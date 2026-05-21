@@ -6,6 +6,7 @@ Supports category browsing, multi-provider streaming, and episode hydration.
 """
 
 import os
+import sys
 import signal
 import subprocess
 import logging
@@ -158,11 +159,22 @@ class Plugin:
 
         logger.info("Starting HTTP filesystem server on port %d", port)
 
-        # Start child process with FastAPI server
-        cmd = ["python", "-m", "plugin.server", "--port", str(port)]
+        # Start child process with Django-initialized server
+        # The standalone_runner calls django.setup() before importing models
+        cmd = [
+            sys.executable, "-m", "plugin.standalone_runner",
+            "--port", str(port)
+        ]
+
+        # Pass Django settings to child
+        env = os.environ.copy()
+        if "DJANGO_SETTINGS_MODULE" not in env:
+            env["DJANGO_SETTINGS_MODULE"] = "dispatcharr.settings"
+
         try:
             process = subprocess.Popen(
                 cmd,
+                env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True  # Detach from parent process

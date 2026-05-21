@@ -154,39 +154,61 @@ class VirtualTree:
         """Get Series/All directory"""
         return self._series_all
 
-    def hydrate_from_dispatcharr(self, movies: list, series: list):
-        """Populate tree with data from Dispatcharr"""
+    def hydrate_from_dispatcharr(self, movies: list, series: list, integrator=None):
+        """Populate tree with data from DispatcharrIntegrator"""
         # Hydrate movies
         for movie in movies:
-            title = movie.get("title", "Unknown")
-            movie_id = movie.get("id", 0)
-            size = movie.get("sizeOnDisk", 0)
-            genres = movie.get("genres", [])
+            title = movie.get("name", "Unknown")
+            year = movie.get("year", 0)
+            uuid = movie.get("uuid", "")
+            genre = movie.get("genre", "")
+            streams = movie.get("streams", [])
 
-            # Create stream URL
-            stream_url = f"/api/v3/stream/movie/{movie_id}"
+            # Add to All directory and categories
+            for stream in streams:
+                stream_url = stream.get("stream_url", "")
+                stream_id = stream.get("stream_id", "")
+                account_name = stream.get("account_name", "Unknown")
+                ext = stream.get("extension", "mkv")
 
-            # Add to All directory
-            if self._movies_all:
-                self._movies_all.add_file(f"{title}.mkv", stream_url, size)
+                # Build filename using integrator if available
+                if integrator:
+                    filename = integrator.build_filename(title, year, account_name, stream_id, ext)
+                else:
+                    filename = f"{title} ({year}) - {account_name}-{stream_id}.{ext}"
 
-            # Add to category directories
-            for genre in genres:
-                cat_dir = self._movies_root.find_child(genre.capitalize()) if self._movies_root else None
-                if cat_dir and cat_dir.is_directory():
-                    cat_dir.add_file(f"{title}.mkv", stream_url, size)  # type: ignore[arg-type]
+                # Add to All directory
+                if self._movies_all:
+                    self._movies_all.add_file(filename, stream_url)
+
+                # Add to genre category if it exists
+                if genre and self._movies_root:
+                    cat_dir = self._movies_root.find_child(genre)
+                    if cat_dir and cat_dir.is_directory():
+                        cat_dir.add_file(filename, stream_url)  # type: ignore[arg-type]
 
         # Hydrate series
         for show in series:
-            title = show.get("title", "Unknown")
-            series_id = show.get("id", 0)
-            genres = show.get("genres", [])
+            title = show.get("name", "Unknown")
+            year = show.get("year", 0)
+            uuid = show.get("uuid", "")
+            genre = show.get("genre", "")
+            providers = show.get("providers", [])
 
-            # Create series directory
+            # Create series directory in All
             if self._series_all:
-                show_dir = self._series_all.add_directory(title)
-                # Add placeholder for episodes (will be hydrated on demand)
-                show_dir.metadata["series_id"] = series_id
+                show_dir = self._series_all.add_directory(f"{title} ({year})")
+                show_dir.metadata["series_uuid"] = uuid
+                show_dir.metadata["hydrated"] = False
+
+                # Store provider info for episode hydration
+                show_dir.metadata["providers"] = providers
+
+            # Add to genre category if it exists
+            if genre and self._series_root:
+                cat_dir = self._series_root.find_child(genre)
+                if cat_dir and cat_dir.is_directory():
+                    cat_dir.add_directory(f"{title} ({year})")  # type: ignore[union-attr]
 
     def hydrate_episodes(self, series_dir: 'DirectoryNode', episodes: list):
         """Populate series directory with season/episode structure"""

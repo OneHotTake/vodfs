@@ -1,6 +1,5 @@
 """FastAPI HTTP server for VOD filesystem"""
 
-import argparse
 import logging
 import uvicorn
 from fastapi import FastAPI, Request
@@ -20,10 +19,8 @@ def create_app(tree: VirtualTree) -> FastAPI:
     @app.api_route("/{path:path}", methods=["GET", "HEAD"])
     async def handle_request(path: str, request: Request):
         """Handle all filesystem requests"""
-        # Normalize path - ensure leading slash
         if not path.startswith("/"):
             path = "/" + path
-
         return await httpfs.handle_request(path, request)
 
     @app.get("/")
@@ -36,12 +33,15 @@ def create_app(tree: VirtualTree) -> FastAPI:
 
 def run_server(port: int, log_level: str = "info"):
     """Run the FastAPI server using uvicorn"""
+    # Import here so Django is already set up by standalone_runner
+    from .tree import VirtualTree
+
     tree = VirtualTree()
     tree.build()
 
     app = create_app(tree)
 
-    # Bind to 127.0.0.1 only (localhost)
+    logger.info("Uvicorn starting on 127.0.0.1:%d", port)
     uvicorn.run(
         app,
         host="127.0.0.1",
@@ -49,17 +49,3 @@ def run_server(port: int, log_level: str = "info"):
         log_level=log_level,
         access_log=True
     )
-
-
-def main():
-    """Main entry point for running the server"""
-    parser = argparse.ArgumentParser(description="VOD HTTP Filesystem Server")
-    parser.add_argument("--port", type=int, default=8888, help="Port to listen on")
-    parser.add_argument("--log-level", type=str, default="info", help="Log level")
-    args = parser.parse_args()
-
-    run_server(args.port, args.log_level)
-
-
-if __name__ == "__main__":
-    main()

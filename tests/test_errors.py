@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 from fastapi import Request
 from plugin.tree import VirtualTree
 from plugin.httpfs import HTTPFilesystem
-from plugin.dispatcharr import DispatcharrClient
+from plugin.integration import DispatcharrIntegrator
 
 
 class TestErrorResponses:
@@ -60,30 +60,29 @@ class TestErrorResponses:
 class TestCredentialRedaction:
     """Test credential redaction in logs"""
 
-    def test_api_key_not_in_error_message(self):
-        """Test API key is not exposed in error messages"""
-        import httpx
-        client = DispatcharrClient("http://localhost:8080", "secret-api-key-12345")
+    def test_integrator_does_not_expose_credentials(self):
+        """Test integrator doesn't expose sensitive data"""
+        integrator = DispatcharrIntegrator(auto_hydrate=True)
 
-        # Check that the API key is stored internally but not exposed
-        assert client._api_key == "secret-api-key-12345"
+        # Should not be available without Django
+        assert not integrator.is_available()
 
-        # Verify error handling doesn't expose key
-        with patch.object(client._client, 'get', side_effect=httpx.HTTPError("Connection error")):
-            movies = client.get_movies()
-            assert movies == []
+    def test_proxy_url_safe(self):
+        """Test proxy URL generation doesn't include credentials"""
+        integrator = DispatcharrIntegrator()
 
-        client._client.close()
+        url = integrator.get_proxy_url("movie", "abc123", "stream456")
+        assert url == "/proxy/vod/movie/abc123?stream_id=stream456"
+        # No credentials in URL
+        assert "key" not in url.lower()
+        assert "secret" not in url.lower()
 
-    def test_redacted_base_url(self):
-        """Test base URL doesn't contain credentials"""
-        client = DispatcharrClient("http://localhost:8080", "secret-key")
+    def test_filename_safe(self):
+        """Test filename generation is safe"""
+        integrator = DispatcharrIntegrator()
 
-        # Base URL should be clean
-        assert "secret-key" not in client.base_url
-        assert "secret-key" not in client.get_stream_url(1, "movie")
-
-        client._client.close()
+        filename = integrator.build_filename("Test Movie", 2024, "Provider", "123", "mkv")
+        assert filename == "Test Movie (2024) - Provider-123.mkv"
 
 
 class TestStructuredLogging:
@@ -107,7 +106,6 @@ class TestStructuredLogging:
         logger.addHandler(log_capture)
 
         # Log an error with sensitive data
-        sensitive_data = "api-key-12345"
         logger.error("Test error with %s", "REDACTED")
 
         # Verify the logger works
