@@ -18,7 +18,7 @@ cd dispatcharr-vodfs
 ### Install Dependencies
 
 ```bash
-pip install fastapi uvicorn jinja2
+pip install fastapi uvicorn jinja2 httpx celery pytest pytest-asyncio
 ```
 
 ### Development Workflow
@@ -242,6 +242,44 @@ Child process logs (when implemented) will be in:
 - Check Dispatcharr proxy is running
 - Verify stream URLs are valid
 - Check M3U account credentials
+
+## Architecture Overview
+
+### Components
+
+- **plugin.py** - Main entry point, manages child HTTP server process
+- **server.py** - FastAPI HTTP server binding to 127.0.0.1
+- **httpfs.py** - HTTP request handlers (GET, HEAD, 302 redirects)
+- **tree.py** - Virtual filesystem tree with O(1) child lookup
+- **dispatcharr.py** - Dispatcharr API client (movies, series, episodes)
+- **celery_worker.py** - Background hydration tasks
+
+### Data Flow
+
+1. Plugin `run()` starts FastAPI server as subprocess
+2. Server binds to 127.0.0.1:port
+3. rclone mounts HTTP endpoint
+4. Plex scans mounted filesystem
+5. Directory requests return HTML listing
+6. File requests return 302 redirect to Dispatcharr proxy
+7. Series browsing triggers episode hydration
+
+### Sprint History
+
+| Sprint | Title | Status |
+|--------|-------|--------|
+| 101 | GitHub Repository Setup | ✓ |
+| 102 | Basic HTTP Server | ✓ |
+| 103 | Virtual Filesystem Tree | ✓ |
+| 104 | Dispatcharr Integration | ✓ |
+| 105 | HTTP 302 Redirects | ✓ |
+| 106 | Celery Background Tasks | ✓ |
+| 107 | Series Episode Hydration | ✓ |
+| 108 | Plex Integration Testing | Pending |
+| 109 | Multi-Stream File Handling | ✓ |
+| 110 | Large Library Performance | ✓ |
+| 111 | Error Handling and Logging | ✓ |
+| 112 | Documentation Polish | ✓ |
 
 ## Contributing
 

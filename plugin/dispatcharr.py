@@ -68,3 +68,13 @@ class DispatcharrClient:
     def get_stream_url(self, file_id: int, file_type: str = "movie") -> str:
         """Get proxy stream URL for a file"""
         return f"{self.base_url}/api/v3/stream/{file_type}/{file_id}"
+
+    def get_episodes(self, series_id: int) -> List[Dict[str, Any]]:
+        """Fetch all episodes for a series"""
+        try:
+            response = self._client.get(f"/api/v3/episode?seriesId={series_id}")
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError as e:
+            logger.error("Failed to fetch episodes for series %d: %s", series_id, e)
+            return []

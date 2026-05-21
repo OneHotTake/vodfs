@@ -94,6 +94,12 @@
 - Finalize developer docs
 
 ## Completed
+- sprint-112 — Documentation polish ✓
+- sprint-111 — Error handling and logging ✓
+- sprint-110 — Large library performance ✓
+- sprint-109 — Multi-stream file handling ✓
+- sprint-107 — Series episode hydration ✓
+- sprint-106 — Celery background tasks ✓
 - sprint-105 — HTTP 302 redirects ✓
 - sprint-104 — Dispatcharr integration ✓
 - sprint-103 — Virtual filesystem tree ✓

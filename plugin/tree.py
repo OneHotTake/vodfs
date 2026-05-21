@@ -18,6 +18,7 @@ class FSNode:
     node_type: NodeType
     children: List['FSNode'] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
+    _children_map: dict = field(default_factory=dict, repr=False)
 
     def is_directory(self) -> bool:
         return self.node_type == NodeType.DIRECTORY
@@ -26,15 +27,13 @@ class FSNode:
         return self.node_type == NodeType.FILE
 
     def find_child(self, name: str) -> Optional['FSNode']:
-        """Find child by name"""
-        for child in self.children:
-            if child.name == name:
-                return child
-        return None
+        """Find child by name - O(1) lookup"""
+        return self._children_map.get(name)
 
     def add_child(self, child: 'FSNode'):
-        """Add a child node"""
+        """Add a child node - O(1)"""
         self.children.append(child)
+        self._children_map[child.name] = child
 
     def get_file_size(self) -> int:
         """Get file size (from metadata)"""
@@ -188,3 +187,25 @@ class VirtualTree:
                 show_dir = self._series_all.add_directory(title)
                 # Add placeholder for episodes (will be hydrated on demand)
                 show_dir.metadata["series_id"] = series_id
+
+    def hydrate_episodes(self, series_dir: 'DirectoryNode', episodes: list):
+        """Populate series directory with season/episode structure"""
+        seasons = {}
+
+        for episode in episodes:
+            season_num = episode.get("seasonNumber", 0)
+            episode_num = episode.get("episodeNumber", 0)
+            episode_title = episode.get("title", f"Episode {episode_num}")
+            episode_id = episode.get("id", 0)
+            size = episode.get("size", 0)
+
+            season_key = f"S{season_num:02d}"
+            if season_key not in seasons:
+                seasons[season_key] = series_dir.add_directory(season_key)
+
+            filename = f"{season_key}E{episode_num:02d} - {episode_title}.mkv"
+            stream_url = f"/api/v3/stream/episode/{episode_id}"
+            seasons[season_key].add_file(filename, stream_url, size)
+
+        # Mark series as hydrated
+        series_dir.metadata["hydrated"] = True
