@@ -158,14 +158,35 @@ class Plugin:
 
         logger.info("Starting HTTP filesystem server on port %d", port)
 
-        # TODO: Start child process with FastAPI server
-        # For now, return placeholder
-        return {
-            "status": "ok",
-            "message": "HTTP filesystem server enabled (implementation in progress)",
-            "port": port,
-            "auto_hydrate": auto_hydrate
-        }
+        # Start child process with FastAPI server
+        cmd = ["python", "-m", "plugin.server", "--port", str(port)]
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True  # Detach from parent process
+            )
+
+            # Save PID for graceful shutdown
+            self._save_pid(process.pid)
+            self._child_process = process
+
+            logger.info("Server started on PID %d, binding to 127.0.0.1:%d", process.pid, port)
+
+            return {
+                "status": "ok",
+                "message": "HTTP filesystem server enabled",
+                "pid": process.pid,
+                "port": port,
+                "auto_hydrate": auto_hydrate
+            }
+        except Exception as e:
+            logger.exception("Failed to start server: %s", e)
+            return {
+                "status": "error",
+                "message": f"Failed to start server: {str(e)}"
+            }
 
     def _disable(self, logger: logging.Logger) -> Dict[str, Any]:
         """Disable the plugin and stop child process"""

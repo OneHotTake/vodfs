@@ -40,9 +40,9 @@ class HTTPFilesystem:
             return RedirectResponse(url=f"{path}/", status_code=301)
 
         if node.is_directory():
-            return await self.serve_directory(node, path)
+            return await self.serve_directory(node, path)  # type: ignore[arg-type]
         else:
-            return await self.serve_file(node)
+            return await self.serve_file(node)  # type: ignore[arg-type]
 
     async def handle_head(self, path: str, request: Request) -> Response:
         """Handle HEAD request"""
@@ -56,9 +56,9 @@ class HTTPFilesystem:
             return RedirectResponse(url=f"{path}/", status_code=301)
 
         if node.is_directory():
-            return Response(status_code=200, headers={"content-type": "text/html"})
+            return Response(status_code=200, headers={"content-type": "text/html; charset=utf-8"})
         else:
-            return await self.head_file(node)
+            return await self.head_file(node)  # type: ignore[arg-type]
 
     async def serve_directory(self, node: DirectoryNode, path: str) -> Response:
         """Serve directory listing as HTML"""

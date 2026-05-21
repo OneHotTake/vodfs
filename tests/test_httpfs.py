@@ -20,7 +20,7 @@ class TestHTTPFilesystem:
         all_dir = movies.add_directory("All")
         all_dir.add_file("Test.mkv", "http://example.com/stream.mkv", 1234567890)
 
-        self.httpfs = HTTPFilesystem(self.tree.root)
+        self.httpfs = HTTPFilesystem(self.tree)
 
     @pytest.mark.asyncio
     async def test_handle_get_root(self):
@@ -117,7 +117,7 @@ class TestDirectoryListing:
         all_dir.add_file("Movie2.mkv", "http://example.com/stream2.mkv", 2000)
         all_dir.add_directory("Category1")
 
-        self.httpfs = HTTPFilesystem(self.tree.root)
+        self.httpfs = HTTPFilesystem(self.tree)
 
     @pytest.mark.asyncio
     async def test_directory_listing_html(self):
@@ -177,7 +177,7 @@ class TestFileRedirect:
         all_dir = movies.add_directory("All")
         all_dir.add_file("Test.mkv", "http://example.com/stream.mkv")
 
-        self.httpfs = HTTPFilesystem(self.tree.root)
+        self.httpfs = HTTPFilesystem(self.tree)
 
     @pytest.mark.asyncio
     async def test_file_redirects_to_stream_url(self):
@@ -225,7 +225,7 @@ class TestHEADResponse:
         file_node.metadata["content_type"] = "video/x-matroska"
         file_node.metadata["last_modified"] = "Mon, 20 May 2026 12:00:00 GMT"
 
-        self.httpfs = HTTPFilesystem(self.tree.root)
+        self.httpfs = HTTPFilesystem(self.tree)
 
     @pytest.mark.asyncio
     async def test_head_includes_all_headers(self):

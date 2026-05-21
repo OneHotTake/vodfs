@@ -94,5 +94,6 @@
 - Finalize developer docs
 
 ## Completed
+- sprint-102 — Basic HTTP server ✓
 - sprint-101 — GitHub repository setup ✓
 - setup — Project initialization

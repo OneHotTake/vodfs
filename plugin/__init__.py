@@ -1,3 +1,5 @@
-"""VOD HTTP Filesystem Plugin Package"""
+"""HTTP server package exports"""
 
-__version__ = "0.1.0"
+from .server import create_app, run_server
+
+__all__ = ["create_app", "run_server"]
