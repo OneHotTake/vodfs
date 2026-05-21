@@ -1,31 +1,31 @@
 SCOPE_CEILING: Max 3 files | Deliverable: diff only | Stop after first working solution
 
-COMPLETE: sprint-102 — Basic HTTP Server. Build: OK.
+COMPLETE: sprints 103-105 — Virtual FS Tree, Dispatcharr Integration, HTTP 302 Redirects. Build: OK.
 ---
 status: active
-task: sprint-102 — Basic HTTP Server
+task: sprints 103-105 — Virtual FS Tree, Dispatcharr Integration, HTTP 302 Redirects
 last_updated: 2026-05-21
 
 ## Summary
-- Created plugin/server.py with FastAPI server binding to 127.0.0.1
-- Implemented subprocess HTTP server startup in plugin._enable()
-- Fixed PID persistence (already implemented in plugin.py)
-- Fixed HTTP content-type header for HEAD requests
-- Updated test fixtures to pass VirtualTree instead of tree.root
+- **Sprint 103:** Added All sibling structure and category directories to VirtualTree
+- **Sprint 104:** Created DispatcharrClient for API integration, added tree hydration
+- **Sprint 105:** Verified 302 redirect logic, added range request support tests
 
 ## Files Modified
-- `plugin/server.py` — Created FastAPI server with 127.0.0.1 binding
-- `plugin/plugin.py` — Implemented HTTP server subprocess startup
+- `plugin/tree.py` — Added All directories, category dirs, hydrate_from_dispatcharr()
+- `plugin/dispatcharr.py` — Created Dispatcharr API client
 - `plugin/httpfs.py` — Fixed content-type header charset
-- `plugin/__init__.py` — Added server exports
-- `tests/test_httpfs.py` — Updated HTTPFilesystem initialization
+- `tests/test_tree.py` — Added All sibling structure tests
+- `tests/test_integration.py` — Rewrote for DispatcharrClient and hydration tests
+- `tests/test_httpfs.py` — Added range request and rclone simulation tests
 
 ## Verification
-- [x] `python3 -m pytest tests/test_httpfs.py` (all 14 tests pass)
-- [x] Manual test: Server binds to 127.0.0.1:8765
-- [x] Manual test: Server shuts down gracefully via timeout
-- [x] PID persistence implemented in plugin.py
-- [x] Server binds to localhost only (127.0.0.1)
+- [x] `python3 -m pytest tests/` — 49/49 tests pass
+- [x] All directories created: /Movies/All, /Series/All, categories
+- [x] Dispatcharr client fetches movies/series
+- [x] Tree hydration populates filesystem nodes
+- [x] 302 redirects work for file playback
+- [x] Range request headers present for seekable playback
 
 ## Next Steps
-- [ ] Begin sprint-103 — Virtual filesystem tree implementation
+- [ ] Begin sprint-106 — Celery background tasks

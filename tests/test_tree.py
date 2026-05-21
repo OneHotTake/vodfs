@@ -138,16 +138,16 @@ class TestTreeStructure:
         tree.build()
 
         movies = tree.get_movies_root()
+        all_dir = tree.get_movies_all()
 
-        # Add 'All' directory
-        all_dir = movies.add_directory("All")
+        # All should already exist from build()
+        assert all_dir is not None
 
-        # Add category directories
-        action_dir = movies.add_directory("Action")
-        comedy_dir = movies.add_directory("Comedy")
+        # Get category directories
+        action_dir = movies.find_child("Action")
+        comedy_dir = movies.find_child("Comedy")
 
-        # Verify all are siblings
-        assert len(movies.children) == 3
+        # Verify all are siblings (children of Movies)
         assert all_dir in movies.children
         assert action_dir in movies.children
         assert comedy_dir in movies.children
@@ -167,3 +167,84 @@ class TestTreeStructure:
         assert movies != series
         assert movies.find_child("Series") is None
         assert series.find_child("Movies") is None
+
+
+class TestAllSiblingStructure:
+    """Test All sibling structure functionality"""
+
+    def test_all_directory_created_automatically(self):
+        """Verify All directory is created during build"""
+        tree = VirtualTree()
+        tree.build()
+
+        movies_all = tree.get_movies_all()
+        series_all = tree.get_series_all()
+
+        assert movies_all is not None
+        assert movies_all.name == "All"
+        assert series_all is not None
+        assert series_all.name == "All"
+
+    def test_all_is_sibling_to_categories(self):
+        """Verify All is sibling to category directories"""
+        tree = VirtualTree()
+        tree.build()
+
+        movies = tree.get_movies_root()
+        movies_all = tree.get_movies_all()
+
+        # All should be a child of Movies
+        assert movies_all in movies.children
+
+        # Category directories should also be children of Movies
+        action = movies.find_child("Action")
+        assert action is not None
+        assert action != movies_all
+
+        # All should not contain categories
+        assert movies_all.find_child("Action") is None
+
+    def test_category_directories_created(self):
+        """Verify default categories are created"""
+        tree = VirtualTree()
+        tree.build()
+
+        movies = tree.get_movies_root()
+
+        for category in VirtualTree.DEFAULT_CATEGORIES:
+            cat_dir = movies.find_child(category)
+            assert cat_dir is not None, f"Category {category} not found"
+            assert cat_dir.is_directory()
+
+    def test_custom_categories(self):
+        """Verify custom categories can be specified"""
+        tree = VirtualTree()
+        custom_cats = ["Custom1", "Custom2"]
+        tree.build(categories=custom_cats)
+
+        movies = tree.get_movies_root()
+
+        assert movies.find_child("Custom1") is not None
+        assert movies.find_child("Custom2") is not None
+        # Default categories should not exist
+        assert movies.find_child("Action") is None
+
+    def test_resolve_all_path(self):
+        """Verify path resolution to All directory"""
+        tree = VirtualTree()
+        tree.build()
+
+        node = tree.resolve_path("/Movies/All")
+        assert node is not None
+        assert node.name == "All"
+        assert node.is_directory()
+
+    def test_resolve_category_path(self):
+        """Verify path resolution to category directory"""
+        tree = VirtualTree()
+        tree.build()
+
+        node = tree.resolve_path("/Movies/Action")
+        assert node is not None
+        assert node.name == "Action"
+        assert node.is_directory()

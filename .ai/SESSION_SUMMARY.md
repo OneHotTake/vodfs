@@ -7,8 +7,9 @@
 | setup | Sonnet | ~8,500 | 29 files created | OK |
 | sprint-101 | Sonnet | ~2,000 | 5 files updated | OK |
 | sprint-102 | Sonnet | ~2,500 | 5 files updated | OK |
+| sprints 103-105 | Sonnet | ~4,000 | 6 files updated | OK |
 
-**Total tokens this sprint:** ~13,000
+**Total tokens this sprint:** ~17,000
 
 **Tokens saved vs. previous pattern:** Estimated 30% (parallel exploration vs. sequential)
 

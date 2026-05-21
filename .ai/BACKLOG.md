@@ -94,6 +94,9 @@
 - Finalize developer docs
 
 ## Completed
+- sprint-105 — HTTP 302 redirects ✓
+- sprint-104 — Dispatcharr integration ✓
+- sprint-103 — Virtual filesystem tree ✓
 - sprint-102 — Basic HTTP server ✓
 - sprint-101 — GitHub repository setup ✓
 - setup — Project initialization

@@ -257,3 +257,79 @@ class TestHEADResponse:
         assert response.status_code == 200
         assert response.headers["accept-ranges"] == "bytes"
         assert response.headers["content-type"] == "application/octet-stream"
+
+
+class TestRangeRequestSupport:
+    """Test range request support for seekable playback"""
+
+    def setup_method(self):
+        """Set up test fixtures"""
+        self.tree = VirtualTree()
+        self.tree.build()
+
+        movies = self.tree.get_movies_root()
+        all_dir = movies.add_directory("All")
+        all_dir.add_file("Test.mkv", "http://example.com/stream.mkv", 1000000)
+
+        self.httpfs = HTTPFilesystem(self.tree)
+
+    @pytest.mark.asyncio
+    async def test_head_includes_accept_ranges(self):
+        """Test HEAD response includes Accept-Ranges header"""
+        request = Mock(spec=Request)
+        request.method = "HEAD"
+
+        response = await self.httpfs.handle_head("/Movies/All/Test.mkv", request)
+
+        assert response.status_code == 200
+        assert response.headers["accept-ranges"] == "bytes"
+        assert response.headers["content-length"] == "1000000"
+
+    @pytest.mark.asyncio
+    async def test_redirect_preserves_stream_url(self):
+        """Test GET redirect preserves stream URL"""
+        request = Mock(spec=Request)
+        request.method = "GET"
+
+        response = await self.httpfs.handle_get("/Movies/All/Test.mkv", request)
+
+        assert response.status_code == 302
+        assert "http://example.com/stream.mkv" in response.headers["location"]
+
+
+class TestRcloneSimulation:
+    """Test behavior simulating rclone mount access"""
+
+    def setup_method(self):
+        """Set up test fixtures"""
+        self.tree = VirtualTree()
+        self.tree.build()
+
+        movies = self.tree.get_movies_root()
+        all_dir = movies.add_directory("All")
+        all_dir.add_file("Movie.mkv", "http://proxy:8080/stream/1", 5000000)
+
+        self.httpfs = HTTPFilesystem(self.tree)
+
+    @pytest.mark.asyncio
+    async def test_directory_listing_for_rclone(self):
+        """Test directory listing works for rclone mount"""
+        request = Mock(spec=Request)
+        request.method = "GET"
+
+        response = await self.httpfs.handle_get("/Movies/All/", request)
+
+        assert response.status_code == 200
+        content = response.body.decode()
+        assert "Movie.mkv" in content
+
+    @pytest.mark.asyncio
+    async def test_file_redirect_for_playback(self):
+        """Test file redirect works for playback"""
+        request = Mock(spec=Request)
+        request.method = "GET"
+
+        response = await self.httpfs.handle_get("/Movies/All/Movie.mkv", request)
+
+        assert response.status_code == 302
+        assert response.headers["location"] == "http://proxy:8080/stream/1"
