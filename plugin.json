@@ -1,0 +1,63 @@
+{
+  "name": "VOD HTTP Filesystem",
+  "version": "0.1.0",
+  "description": "Expose VOD library to Plex as mountable HTTP filesystem with category support and multi-provider streaming",
+  "author": "onehottake",
+  "license": "MIT",
+  "repo_url": "https://github.com/OneHotTake/dispatcharr-vodfs",
+  "discord_thread": "",
+  "min_dispatcharr_version": "v0.20.0",
+  "fields": [
+    {
+      "id": "enabled",
+      "label": "Enabled",
+      "type": "boolean",
+      "default": false
+    },
+    {
+      "id": "http_port",
+      "label": "HTTP Port",
+      "type": "number",
+      "default": 8888,
+      "min": 1024,
+      "max": 65535,
+      "help_text": "Port for the HTTP filesystem server"
+    },
+    {
+      "id": "auto_hydrate_empty_series",
+      "label": "Auto-hydrate Empty Series",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Automatically fetch episodes when browsing Series directories"
+    }
+  ],
+  "actions": [
+    {
+      "id": "enable",
+      "label": "Enable HTTP Filesystem",
+      "description": "Start the HTTP filesystem server",
+      "button_label": "🚀 Enable",
+      "button_variant": "filled",
+      "button_color": "green"
+    },
+    {
+      "id": "disable",
+      "label": "Disable HTTP Filesystem",
+      "description": "Stop the HTTP filesystem server",
+      "button_label": "🛑 Disable",
+      "button_variant": "outline",
+      "button_color": "red",
+      "confirm": {
+        "message": "Are you sure you want to stop the HTTP filesystem server?"
+      }
+    },
+    {
+      "id": "show_rclone_config",
+      "label": "Show rclone Configuration",
+      "description": "Display the rclone configuration for mounting this filesystem",
+      "button_label": "📋 rclone Config",
+      "button_variant": "outline",
+      "button_color": "cyan"
+    }
+  ]
+}
