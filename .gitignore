@@ -71,3 +71,8 @@ config.local.json
 
 # rclone config (may contain tokens)
 rclone.conf
+
+# Local dev artifacts
+TOKEN_BUDGET.md
+.ai/TOKEN_BUDGET.md
+config.json
