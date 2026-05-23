@@ -1,4 +1,4 @@
-"""Virtual filesystem tree implementation with lazy path resolution"""
+"""Virtual filesystem tree implementation with live DB queries"""
 
 from dataclasses import dataclass, field
 from enum import Enum
@@ -6,10 +6,8 @@ from typing import List, Optional, Any, Dict
 import logging
 
 try:
-    from .manifest import ManifestManager
     from .integration import _get_dispatcharr_base_url, DispatcharrIntegrator
 except ImportError:
-    from manifest import ManifestManager
     from integration import _get_dispatcharr_base_url, DispatcharrIntegrator
 
 logger = logging.getLogger(__name__)
@@ -90,15 +88,14 @@ class DirectoryNode(FSNode):
 
 
 class VirtualTree:
-    """Virtual filesystem tree with lazy path resolution"""
+    """Virtual filesystem tree with live DB queries (no manifest caching)"""
 
-    def __init__(self, manifest_manager: Optional[ManifestManager] = None):
+    def __init__(self):
         self.root = DirectoryNode("")
         self._movies_root = None
         self._series_root = None
         self._movies_all = None
         self._series_all = None
-        self._manifest_manager = manifest_manager or ManifestManager()
 
     def build(self):
         """Build the complete virtual tree structure"""
@@ -106,28 +103,12 @@ class VirtualTree:
         self._series_root = self.root.add_directory("Series")
         self._movies_all = self._movies_root.add_directory("All")
         self._series_all = self._series_root.add_directory("All")
-        self._populate_categories_from_manifest()
-
-    def _populate_categories_from_manifest(self):
-        """Populate category directories from manifest"""
-        try:
-            movie_categories = self._manifest_manager.get_categories('movies')
-            for cat in movie_categories:
-                self._movies_root.add_directory(cat)
-            series_categories = self._manifest_manager.get_categories('series')
-            for cat in series_categories:
-                self._series_root.add_directory(cat)
-            logger.info("Populated %d movie categories and %d series categories from manifest",
-                       len(movie_categories), len(series_categories))
-        except Exception as e:
-            logger.warning("Failed to populate categories from manifest: %s", e)
 
     def resolve_path(self, path: str) -> Optional[FSNode]:
         """Resolve a filesystem path to a node"""
         if not path or path == "/":
             return self.root
 
-        # Remove leading/trailing slashes and split
         components = [c for c in path.split("/") if c]
 
         current = self.root
@@ -157,94 +138,11 @@ class VirtualTree:
         """Get Series/All directory"""
         return self._series_all
 
-    def hydrate_from_dispatcharr(self, movies: list, series: list, integrator=None):
-        """Populate tree with data from DispatcharrIntegrator"""
-        # Hydrate movies
-        for movie in movies:
-            title = movie.get("name", "Unknown")
-            year = movie.get("year", 0)
-            uuid = movie.get("uuid", "")
-            categories = movie.get("categories", [])
-            streams = movie.get("streams", [])
-
-            for stream in streams:
-                stream_url = stream.get("stream_url", "")
-                stream_id = stream.get("stream_id", "")
-                account_name = stream.get("account_name", "Unknown")
-                ext = stream.get("extension", "mkv")
-                size = stream.get("size", 0)
-
-                # Build filename using integrator if available
-                if integrator:
-                    filename = integrator.build_filename(title, year, account_name, stream_id, ext)
-                else:
-                    filename = f"{title} ({year}) - {account_name}-{stream_id}.{ext}"
-
-                # Add to All directory
-                if self._movies_all:
-                    self._movies_all.add_file(filename, stream_url, size)
-
-                # Add to each category this movie belongs to
-                for category in categories:
-                    if category and self._movies_root:
-                        cat_dir = self._movies_root.add_directory(category)
-                        cat_dir.add_file(filename, stream_url, size)  # type: ignore[arg-type]
-
-        # Hydrate series
-        for show in series:
-            title = show.get("name", "Unknown")
-            year = show.get("year", 0)
-            uuid = show.get("uuid", "")
-            categories = show.get("categories", [])
-            providers = show.get("providers", [])
-
-            # Create series directory in All
-            if self._series_all:
-                show_dir = self._series_all.add_directory(f"{title} ({year})")
-                show_dir.metadata["series_uuid"] = uuid
-                show_dir.metadata["hydrated"] = False
-
-                # Store provider info for episode hydration
-                show_dir.metadata["providers"] = providers
-
-            # Add to each category this series belongs to
-            for category in categories:
-                if category and self._series_root:
-                    cat_dir = self._series_root.add_directory(category)
-                    cat_dir.add_directory(f"{title} ({year})")  # type: ignore[union-attr]
-
-    def hydrate_episodes(self, series_dir: 'DirectoryNode', episodes: list):
-        """Populate series directory with season/episode structure"""
-        seasons = {}
-
-        for episode in episodes:
-            season_num = episode.get("season_number", 0)
-            episode_num = episode.get("episode_number", 0)
-            episode_title = episode.get("name", f"Episode {episode_num}")
-            streams = episode.get("streams", [])
-
-            season_key = f"S{season_num:02d}"
-            if season_key not in seasons:
-                seasons[season_key] = series_dir.add_directory(season_key)
-
-            # Create file for each stream
-            for stream in streams:
-                stream_url = stream.get("stream_url", "")
-                ext = stream.get("extension", "mkv")
-                account = stream.get("account_name", "Unknown")
-                size = stream.get("size", 0)
-                filename = f"{season_key}E{episode_num:02d} - {episode_title} - {account}.{ext}"
-                seasons[season_key].add_file(filename, stream_url, size)
-
-        # Mark series as hydrated
-        series_dir.metadata["hydrated"] = True
-
     def resolve_path_with_db(self, path: str) -> Optional[FSNode]:
-        """Resolve path using manifest + targeted DB queries (lazy resolution)"""
+        """Resolve path with on-demand directory creation"""
         if not path or path == "/":
             return self.root
 
-        # Remove leading/trailing slashes and split
         components = [c for c in path.split("/") if c]
 
         if not components:
@@ -253,17 +151,14 @@ class VirtualTree:
         # Root level: Movies, Series
         if len(components) == 1:
             if components[0] in ["Movies", "Series"]:
-                # Create root directories on demand
                 if components[0] == "Movies":
                     if not self._movies_root:
                         self._movies_root = self.root.add_directory("Movies")
-                        # Always create All directory
                         self._movies_all = self._movies_root.add_directory("All")
                     return self._movies_root
-                else:  # Series
+                else:
                     if not self._series_root:
                         self._series_root = self.root.add_directory("Series")
-                        # Always create All directory
                         self._series_all = self._series_root.add_directory("All")
                     return self._series_root
 
@@ -278,7 +173,7 @@ class VirtualTree:
         return None
 
     def _resolve_movies_path(self, components: List[str]) -> Optional[FSNode]:
-        """Resolve Movies path (lazy DB queries)"""
+        """Resolve Movies path"""
         # /Movies/All/
         if len(components) == 1 and components[0] == "All":
             if not self._movies_root:
@@ -294,14 +189,11 @@ class VirtualTree:
                 return None
             cat_dir = self._movies_root.find_child(category)
             if not cat_dir:
-                # Create category directory
                 cat_dir = self._movies_root.add_directory(category)
             return cat_dir
 
         # /Movies/All/{MovieFile} or /Movies/{Category}/{MovieFile}
         if len(components) >= 2:
-            # Return a placeholder file node for HEAD requests
-            # The actual file metadata is resolved in httpfs.py
             filename = components[-1]
             file_node = FileNode(filename, "", 0, "video/x-matroska")
             file_node.metadata["placeholder"] = True
@@ -310,7 +202,7 @@ class VirtualTree:
         return None
 
     def _resolve_series_path(self, components: List[str]) -> Optional[FSNode]:
-        """Resolve Series path (lazy DB queries)"""
+        """Resolve Series path"""
         # /Series/All/
         if len(components) == 1 and components[0] == "All":
             if not self._series_root:
@@ -336,20 +228,14 @@ class VirtualTree:
             if not parent or not isinstance(parent, DirectoryNode):
                 return None
 
-            # Find or create show directory
             show_dir = parent.find_child(show_name)
             if not show_dir:
-                # Look up series in manifest
-                series_skeleton = self._manifest_manager.get_series_skeleton()
-                for series in series_skeleton:
-                    series_name = series['name']
-                    if f"({series['year']})" not in series['name']:
-                        series_name = f"{series['name']} ({series['year']})"
-                    if series_name == show_name:
-                        show_dir = parent.add_directory(show_name)
-                        show_dir.metadata["series_uuid"] = series["uuid"]
-                        show_dir.metadata["hydrated"] = series["has_episodes"]
-                        break
+                # Look up series in DB by name (with year handling)
+                series_obj = self._find_series_by_display_name(show_name)
+                if series_obj:
+                    show_dir = parent.add_directory(show_name)
+                    show_dir.metadata["series_uuid"] = str(series_obj.uuid)
+                    show_dir.metadata["hydrated"] = series_obj.episodes.exists()
 
             return show_dir
 
@@ -362,15 +248,52 @@ class VirtualTree:
             season_name = components[2]
             season_dir = parent.find_child(season_name)
             if not season_dir:
-                # Create season directory (episodes hydrated on access)
                 season_dir = parent.add_directory(season_name)
 
             return season_dir
 
         return None
 
+    def _find_series_by_display_name(self, display_name: str):
+        """Find a Series object by its display name (handles 'Name (Year)' format)"""
+        try:
+            from apps.vod.models import Series
+        except ImportError:
+            return None
+
+        # Try exact name match first (name already contains year)
+        series = Series.objects.filter(name=display_name).first()
+        if series:
+            return series
+
+        # Try parsing "Name (Year)" format
+        import re
+        match = re.match(r'^(.+?)\s*\((\d{4})\)\s*$', display_name)
+        if match:
+            name_part = match.group(1)
+            year_part = int(match.group(2))
+            series = Series.objects.filter(name=name_part, year=year_part).first()
+            if series:
+                return series
+
+        return None
+
+    def get_enabled_categories(self, content_type: str = 'movie') -> List[str]:
+        """Get list of enabled category names from DB"""
+        try:
+            from apps.vod.models import VODCategory
+        except ImportError:
+            return []
+
+        return list(
+            VODCategory.objects.filter(
+                category_type=content_type,
+                m3u_relations__enabled=True
+            ).values_list('name', flat=True).distinct().order_by('name')
+        )
+
     def get_movies_from_db(self, category: Optional[str] = None) -> List[FileNode]:
-        """Get movies from DB (lazy query)"""
+        """Get movies from DB (live query, only enabled categories)"""
         try:
             from integration import DispatcharrIntegrator
         except ImportError:
@@ -382,15 +305,15 @@ class VirtualTree:
 
         try:
             from apps.vod.models import Movie, M3UMovieRelation
-            from apps.vod.models import VODCategory
-            from django.db.models import Q
         except ImportError:
             return []
 
         base_url = _get_dispatcharr_base_url()
 
-        # Query base
-        queryset = Movie.objects.all().select_related('logo')
+        # Query base - only movies in ENABLED categories
+        queryset = Movie.objects.filter(
+            m3umovierelation__category__m3u_relations__enabled=True
+        ).select_related('logo').distinct()
 
         # Filter by category if specified
         if category:
@@ -406,20 +329,24 @@ class VirtualTree:
             )
 
             for rel in relations:
+                # Skip if category is not enabled for this M3U account
+                if not rel.category or not rel.category.m3u_relations.filter(
+                    m3u_account=rel.m3u_account, enabled=True
+                ).exists():
+                    continue
+
                 # Skip if category filter active and this relation doesn't match
-                if category and rel.category and rel.category.name != category:
+                if category and rel.category.name != category:
                     continue
 
                 stream_url = f"{base_url}/proxy/vod/movie/{movie.uuid}?stream_id={rel.stream_id}"
 
-                # Build filename
                 provider_short = rel.m3u_account.name[:20] if rel.m3u_account else "Unknown"
                 filename = integrator.build_filename(
                     movie.name, movie.year, provider_short,
                     rel.stream_id, rel.container_extension or "mkv"
                 )
 
-                # Estimate size
                 size = 0
                 if movie.duration_secs:
                     size = movie.duration_secs * 250 * 1024
@@ -432,43 +359,56 @@ class VirtualTree:
         return result
 
     def get_series_from_db(self, category: Optional[str] = None) -> List[DirectoryNode]:
-        """Get series from DB (lazy query)"""
-        series_skeleton = self._manifest_manager.get_series_skeleton()
+        """Get series from DB (live query, only enabled categories)"""
+        try:
+            from apps.vod.models import Series, M3USeriesRelation
+        except ImportError:
+            return []
+
+        # Build query: series that have relations in enabled categories
+        queryset = Series.objects.filter(
+            m3u_relations__category__m3u_relations__enabled=True
+        ).distinct()
+
+        if category:
+            queryset = queryset.filter(
+                m3u_relations__category__name=category
+            ).distinct()
 
         result = []
-        for series in series_skeleton:
-            # Filter by category if specified
-            if category and category not in series.get('categories', []):
+        for series in queryset:
+            # Get enabled categories for this series
+            series_categories = list(
+                M3USeriesRelation.objects.filter(series=series)
+                .filter(category__m3u_relations__enabled=True)
+                .values_list('category__name', flat=True)
+                .distinct()
+            )
+
+            # If category filter specified, skip series not in that category
+            if category and category not in series_categories:
                 continue
 
-            # Name may already include year from manifest
-            series_name = series['name']
-            # Only add year if not already in name
-            if f"({series['year']})" not in series['name']:
-                series_name = f"{series['name']} ({series['year']})"
+            series_name = series.name
+            if series.year and f"({series.year})" not in series.name:
+                series_name = f"{series.name} ({series.year})"
+
             dir_node = DirectoryNode(series_name)
-            dir_node.metadata["series_uuid"] = series["uuid"]
-            dir_node.metadata["hydrated"] = series["has_episodes"]
+            dir_node.metadata["series_uuid"] = str(series.uuid)
+            dir_node.metadata["hydrated"] = series.episodes.exists()
             result.append(dir_node)
 
         return result
 
-    def get_series_dir_from_db(self, series_uuid: str) -> Optional[DirectoryNode]:
-        """Get series directory from manifest (lazy)"""
-        series_data = self._manifest_manager.find_series_by_uuid(series_uuid)
-        if not series_data:
-            return None
-
-        series_name = series_data['name']
-        if f"({series_data['year']})" not in series_data['name']:
-            series_name = f"{series_data['name']} ({series_data['year']})"
-        dir_node = DirectoryNode(series_name)
-        dir_node.metadata["series_uuid"] = series_data["uuid"]
-        dir_node.metadata["hydrated"] = series_data["has_episodes"]
-        return dir_node
+    def find_series_uuid_by_name(self, series_name: str) -> Optional[str]:
+        """Find series UUID by display name (live DB query)"""
+        series_obj = self._find_series_by_display_name(series_name)
+        if series_obj:
+            return str(series_obj.uuid)
+        return None
 
     def get_seasons_from_db(self, series_uuid: str) -> List[DirectoryNode]:
-        """Get seasons/episodes from DB (lazy query)"""
+        """Get seasons/episodes from DB (live query)"""
         logger.info("get_seasons_from_db called for UUID: %s", series_uuid)
         try:
             from integration import DispatcharrIntegrator
@@ -480,7 +420,6 @@ class VirtualTree:
             logger.warning("Django not available for get_seasons_from_db")
             return []
 
-        # Use existing get_series_episodes method
         episodes = integrator.get_series_episodes(series_uuid)
         logger.info("get_seasons_from_db found %d episodes for UUID: %s", len(episodes), series_uuid)
         base_url = _get_dispatcharr_base_url()
@@ -491,7 +430,6 @@ class VirtualTree:
             if season_key not in seasons:
                 seasons[season_key] = DirectoryNode(season_key)
 
-            # Create file for each stream
             for stream in episode.get('streams', []):
                 stream_url = stream['stream_url']
                 ext = stream['extension'] or "mkv"

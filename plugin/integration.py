@@ -35,8 +35,6 @@ class DispatcharrIntegrator:
 
     def __init__(self, auto_hydrate: bool = True):
         self.auto_hydrate = auto_hydrate
-        self._hydration_queue: Dict[str, datetime] = {}
-        self._hydration_cooldown = 300  # 5 minutes cooldown
 
     def is_available(self) -> bool:
         """Check if Django models are available"""
@@ -223,45 +221,6 @@ class DispatcharrIntegrator:
             })
 
         return result
-
-    def trigger_hydration(self, series_uuid: str) -> bool:
-        """Trigger episode hydration for a series"""
-        if not self.auto_hydrate or not self.is_available():
-            return False
-
-        # Check cooldown
-        if series_uuid in self._hydration_queue:
-            last_hydration = self._hydration_queue[series_uuid]
-            cooldown_remaining = self._hydration_cooldown - (datetime.now() - last_hydration).total_seconds()
-            if cooldown_remaining > 0:
-                logger.info("Series %s in cooldown (%d seconds remaining)", series_uuid, int(cooldown_remaining))
-                return False
-
-        # Enqueue hydration task
-        try:
-            # Find the series
-            series = Series.objects.get(uuid=series_uuid)
-
-            # Find active M3U accounts
-            accounts = M3UAccount.objects.filter(is_active=True)
-
-            for account in accounts:
-                # Get series relation
-                rel = M3USeriesRelation.objects.filter(series=series, m3u_account=account).first()
-                if rel and rel.external_series_id:
-                    # Queue the task (fire-and-forget)
-                    if refresh_series_episodes:
-                        refresh_series_episodes.delay(account.id, series.id, rel.external_series_id)
-                        logger.info("Enqueued hydration for series %s (account: %s)", series.name, account.name)
-
-            self._hydration_queue[series_uuid] = datetime.now()
-            return True
-        except Series.DoesNotExist:
-            logger.warning("Series %s not found for hydration", series_uuid)
-            return False
-        except Exception as e:
-            logger.exception("Failed to trigger hydration for series %s: %s", series_uuid, e)
-            return False
 
     def get_proxy_url(self, content_type: str, uuid: str, stream_id: str) -> str:
         """Generate Dispatcharr proxy URL for content"""

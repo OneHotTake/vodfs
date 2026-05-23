@@ -88,14 +88,14 @@ class HTTPFilesystem:
                 # /Movies/ - list categories + All
                 entries = [{"name": "../", "href": "../", "size": ""}]
                 entries.append({"name": "All/", "href": "All/", "size": ""})
-                categories = self.tree._manifest_manager.get_categories('movies')
+                categories = self.tree.get_enabled_categories('movie')
                 for cat in categories:
                     entries.append({"name": cat + "/", "href": cat + "/", "size": ""})
             elif components[0] == "Series" and len(components) == 1:
                 # /Series/ - list categories + All
                 entries = [{"name": "../", "href": "../", "size": ""}]
                 entries.append({"name": "All/", "href": "All/", "size": ""})
-                categories = self.tree._manifest_manager.get_categories('series')
+                categories = self.tree.get_enabled_categories('series')
                 for cat in categories:
                     entries.append({"name": cat + "/", "href": cat + "/", "size": ""})
             elif components[0] == "Movies" and len(components) >= 2:
@@ -222,20 +222,8 @@ class HTTPFilesystem:
         return entries
 
     def _extract_series_uuid(self, series_name: str) -> Optional[str]:
-        """Extract series UUID from series directory name using manifest"""
-        skeleton = self.tree._manifest_manager.get_series_skeleton()
-        logger.info("_extract_series_uuid looking for: %s (skeleton count: %d)", series_name, len(skeleton))
-
-        for series in skeleton:
-            # Try both formats: name may already include year
-            display_name_with_year = f"{series['name']} ({series['year']})"
-            logger.debug("  Checking: name='%s', with_year='%s' vs target='%s'", series['name'], display_name_with_year, series_name)
-            if series['name'] == series_name or display_name_with_year == series_name:
-                logger.info("  MATCH found: %s", series['uuid'])
-                return series['uuid']
-
-        logger.warning("No match found for series_name: %s", series_name)
-        return None
+        """Extract series UUID from series directory name using live DB query"""
+        return self.tree.find_series_uuid_by_name(series_name)
 
     async def serve_file(self, node: FileNode) -> Response:
         """Serve file - redirect to stream URL"""

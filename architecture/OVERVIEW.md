@@ -75,40 +75,51 @@ The VOD HTTP Filesystem Plugin exposes Dispatcharr's VOD library as a mountable 
 
 ### 2. Virtual Filesystem Tree (`tree.py`)
 
-**Purpose**: Build and maintain the virtual directory structure.
+**Purpose**: Build and maintain the virtual directory structure with lazy path resolution.
 
 **Responsibilities**:
 - Represent filesystem as a tree of `FSNode` objects
-- Build Movies structure (All + real categories from `vod_vodcategory`)
-- Build Series structure (All + real categories)
-- Resolve paths to nodes
+- Build Movies structure (All + real categories from manifest)
+- Build Series structure (All + real categories from manifest)
+- Resolve paths using manifest + targeted DB queries (lazy resolution)
 - Support directory and file node types
-- Hydrate from Dispatcharr data
+- Query movies/series/seasons from DB on demand
 
 **Key Classes**:
 - `FSNode` - Base node class
 - `DirectoryNode` - Directory with children
 - `FileNode` - File with stream URL and size
-- `VirtualTree` - Tree builder and resolver
+- `VirtualTree` - Tree builder and lazy resolver
+
+**Key Methods**:
+- `resolve_path_with_db(path)` - Lazy path resolution with manifest + DB
+- `get_movies_from_db(category)` - Lazy movie query
+- `get_series_from_db(category)` - Lazy series query from manifest
+- `get_seasons_from_db(series_uuid)` - Lazy episode query grouped by season
 
 ### 3. HTTP Handlers (`httpfs.py`)
 
-**Purpose**: Handle HTTP requests for the filesystem.
+**Purpose**: Handle HTTP requests for the filesystem with lazy queries and caching.
 
 **Responsibilities**:
-- Serve directory listings (GET)
+- Serve directory listings (GET) with lazy DB queries
 - Handle HEAD requests (metadata)
 - Return 302 redirects to Dispatcharr proxy (GET on files)
 - Generate HTML directory listings
 - Handle trailing slash redirects
-- Trigger episode hydration for empty Series directories
+- Cache directory listings (LRU, 5000 entries, 600s TTL)
+- Route series paths to appropriate handlers (seasons vs episodes)
 
 **Key Methods**:
 - `handle_get(path, request)` - GET request handler
 - `handle_head(path, request)` - HEAD request handler
-- `serve_directory(node, path)` - Directory listing
+- `serve_directory(node, path)` - Directory listing with lazy queries + cache
 - `serve_file(node)` - 302 redirect to stream URL
-- `_maybe_hydrate_series(node)` - Trigger episode hydration
+- `_get_movies_listing(category)` - Lazy movie query
+- `_get_series_listing(category)` - Lazy series query from manifest
+- `_get_seasons_listing(series_name)` - Lists season directories
+- `_get_episodes_listing(series_name, season_name)` - Lists episode files
+- `_extract_series_uuid(series_name)` - Manifest-based series UUID lookup
 
 ### 4. Dispatcharr Integration (`integration.py`)
 

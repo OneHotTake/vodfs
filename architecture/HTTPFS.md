@@ -144,19 +144,31 @@ Location: /proxy/vod/movie/abc123?stream_id=12345
 
 ## Path Resolution
 
-Path resolution follows standard filesystem semantics:
+Path resolution uses lazy DB queries with manifest caching:
 
 1. Split path by `/`
-2. Traverse tree from root
-3. Return node or None (404)
+2. Use manifest for category/series skeleton lookups
+3. Query DB only when needed (movies, episodes)
+4. Return node or None (404)
 
 **Examples**:
 - `/` → Root node (Movies, Series)
-- `/Movies/` → Movies directory
-- `/Movies/All/` → All movies directory
-- `/Movies/Action/` → Action category directory
-- `/Movies/All/Inception (2010).mkv` → File node
+- `/Movies/` → Movies directory (categories from manifest)
+- `/Movies/All/` → All movies directory (lazy DB query)
+- `/Movies/Action/` → Action category directory (lazy DB query)
+- `/Movies/All/Inception (2010).mkv` → File node (placeholder for HEAD)
+- `/Series/All/Show Name/` → Series directory (manifest lookup)
+- `/Series/All/Show Name/S01/` → Season directory (lazy episode query)
 - `/Invalid/Path/` → None (404)
+
+### Series Path Routing
+
+| Path Components | Handler | Description |
+|-----------------|---------|-------------|
+| `/Series/All/` | `_get_series_listing` | Lists all series from manifest |
+| `/Series/{Category}/` | `_get_series_listing` | Lists series in category |
+| `/Series/{Category}/{Show}/` | `_get_seasons_listing` | Lists season directories |
+| `/Series/{Category}/{Show}/S01/` | `_get_episodes_listing` | Lists episode files |
 
 ## Trailing Slash Handling
 

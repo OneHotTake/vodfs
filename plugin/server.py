@@ -1,22 +1,34 @@
-"""FastAPI HTTP server for VOD filesystem"""
+"""FastAPI HTTP server for VOD filesystem - live DB queries, no manifest caching"""
 
 import logging
 import os
 import threading
 import uvicorn
+from datetime import datetime
+from typing import Optional, List
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import Response
+from fastapi.responses import Response, JSONResponse
 
 try:
     from .tree import VirtualTree
     from .httpfs import HTTPFilesystem
-except ImportError:
+    from .cache import LRUCache
+    from .integration import DispatcharrIntegrator
+except (ImportError, AttributeError):
     from tree import VirtualTree
     from httpfs import HTTPFilesystem
+    from cache import LRUCache
+    from integration import DispatcharrIntegrator
 
 logger = logging.getLogger(__name__)
 
 _ENABLE_AUTH = os.environ.get("VODFS_ENABLE_AUTH", "false").lower() == "true"
+
+
+# Global state
+_server_ready = False
+_startup_errors: List[str] = []
+_directory_cache = LRUCache(max_size=5000, ttl=600)
 
 
 def check_network_access(request: Request):
@@ -25,8 +37,7 @@ def check_network_access(request: Request):
         from dispatcharr.utils import network_access_allowed
         if not network_access_allowed(request, "STREAMS"):
             raise HTTPException(status_code=403, detail="Forbidden")
-    except ImportError:
-        # Dispatcharr utils not available, allow (matches default behavior)
+    except (ImportError, AttributeError):
         pass
 
 
@@ -35,10 +46,8 @@ def check_api_key_auth(request: Request):
     if not _ENABLE_AUTH:
         return
 
-    # Check X-API-Key header first
     api_key = request.headers.get("x-api-key")
 
-    # Fall back to Authorization: ApiKey <key>
     if not api_key:
         auth_header = request.headers.get("authorization", "")
         if auth_header.lower().startswith("apikey "):
@@ -51,7 +60,6 @@ def check_api_key_auth(request: Request):
             headers={"WWW-Authenticate": "ApiKey"}
         )
 
-    # Validate against Dispatcharr User model
     try:
         from django.contrib.auth import get_user_model
         User = get_user_model()
@@ -65,10 +73,87 @@ def check_api_key_auth(request: Request):
         )
 
 
+def _initialize_on_startup_sync():
+    """Mark server as ready (no manifest/hydration needed - live DB queries)"""
+    global _server_ready, _startup_errors
+
+    try:
+        integrator = DispatcharrIntegrator()
+        if integrator.is_available():
+            logger.info("Django available - all queries will be live against DB")
+        else:
+            logger.warning("Django not available - queries will return empty results")
+
+        _server_ready = True
+        logger.info("Server ready")
+
+    except Exception as e:
+        logger.error("Failed to initialize: %s", e)
+        _startup_errors.append(str(e))
+        import traceback
+        logger.error(traceback.format_exc())
+
+
+def _initialize_on_startup():
+    """Initialize on startup (runs in thread)"""
+    thread = threading.Thread(target=_initialize_on_startup_sync, daemon=True)
+    thread.start()
+
+
 def create_app(tree: VirtualTree) -> FastAPI:
     """Create FastAPI application with HTTP filesystem handlers"""
     app = FastAPI(title="VOD HTTP Filesystem")
     httpfs = HTTPFilesystem(tree)
+
+    @app.on_event("startup")
+    async def startup_event():
+        """Initialize on startup"""
+        _initialize_on_startup()
+
+    @app.on_event("shutdown")
+    async def shutdown_event():
+        """Cleanup on shutdown"""
+        logger.info("Shutdown complete")
+
+    @app.get("/healthz")
+    async def healthz():
+        """Basic health check"""
+        return Response(status_code=200, content="OK")
+
+    @app.get("/readyz")
+    async def readyz():
+        """Readiness check"""
+        if not _server_ready:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "not_ready",
+                    "errors": _startup_errors
+                }
+            )
+
+        status = {
+            "status": "ready",
+            "architecture": "live-db-queries",
+            "warnings": []
+        }
+
+        if _startup_errors:
+            status['warnings'].extend(_startup_errors)
+
+        return JSONResponse(content=status)
+
+    @app.get("/status")
+    async def status():
+        """Detailed status"""
+        return JSONResponse(content={
+            "architecture": "live-db-queries",
+            "system": {
+                "auth_enabled": _ENABLE_AUTH,
+                "ready": _server_ready,
+                "startup_errors": _startup_errors
+            }
+        })
 
     @app.api_route("/{path:path}", methods=["GET", "HEAD"])
     async def handle_request(
@@ -94,35 +179,10 @@ def create_app(tree: VirtualTree) -> FastAPI:
     return app
 
 
-def _hydrate_background(tree: VirtualTree):
-    """Hydrate tree in background thread"""
-    try:
-        try:
-            from integration import DispatcharrIntegrator
-        except ImportError:
-            from .integration import DispatcharrIntegrator
-
-        integrator = DispatcharrIntegrator()
-        if integrator.is_available():
-            logger.info("Hydrating tree from Dispatcharr (background)...")
-            movies = integrator.get_all_movies()
-            series = integrator.get_all_series()
-            tree.hydrate_from_dispatcharr(movies, series, integrator)
-            logger.info("Hydrated %d movies and %d series", len(movies), len(series))
-        else:
-            logger.warning("Dispatcharr integration not available, tree will be empty")
-    except Exception as e:
-        logger.error("Failed to hydrate tree: %s", e)
-
-
 def run_server(port: int, log_level: str = "info"):
     """Run the FastAPI server using uvicorn"""
     tree = VirtualTree()
     tree.build()
-
-    # Start hydration in background thread
-    hydrate_thread = threading.Thread(target=_hydrate_background, args=(tree,), daemon=True)
-    hydrate_thread.start()
 
     app = create_app(tree)
 

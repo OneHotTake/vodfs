@@ -183,7 +183,7 @@ class Plugin:
         runner_path = os.path.join(plugin_subdir, "standalone_runner.py")
 
         # Use the Dispatcharr Python environment which has all dependencies
-        python_exe = sys.executable  # This is the Dispatcharr Python
+        python_exe = "/dispatcharrpy/bin/python"  # Use explicit Python path (sys.executable is uwsgi in container)
 
         cmd = [
             python_exe, runner_path,

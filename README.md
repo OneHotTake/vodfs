@@ -13,6 +13,9 @@ Expose your Dispatcharr VOD library to Plex and similar clients as a mountable H
 - **Dispatcharr Integration**: Uses Dispatcharr models, tasks, and proxy infrastructure
 - **302 Redirect Streaming**: All playback goes through Dispatcharr's optimized proxy
 - **Background Hydration**: Server starts immediately; library hydration runs in background thread
+- **Lazy Resolution**: Manifest + targeted DB queries for scalable directory listings (50k-150k items)
+- **Aggressive Startup Hydration**: All zero-episode series queued immediately on startup with 5 concurrent workers
+- **LRU Caching**: Directory listings cached (5000 entries, 600s TTL) for responsive browsing
 
 ## Architecture
 
@@ -48,13 +51,30 @@ Expose your Dispatcharr VOD library to Plex and similar clients as a mountable H
 |  |  HTTP Handlers (httpfs.py)     |   |
 |  |  - Directory listings (HTML)   |   |
 |  |  - 302 redirects               |   |
-|  |  - Series hydration triggers   |   |
+|  |  - Lazy DB queries + cache     |   |
+|  +--------------------------------+   |
+|  +--------------------------------+   |
+|  |  Manifest (manifest.py)        |   |
+|  |  - Atomic JSON manifest        |   |
+|  |  - Watermark detection         |   |
+|  |  - Category/skeleton queries   |   |
+|  +--------------------------------+   |
+|  +--------------------------------+   |
+|  |  Cache (cache.py)              |   |
+|  |  - LRU directory cache         |   |
+|  |  - 5000 entries, 600s TTL      |   |
+|  +--------------------------------+   |
+|  +--------------------------------+   |
+|  |  Hydration (hydration.py)      |   |
+|  |  - Aggressive startup queue    |   |
+|  |  - 5 concurrent workers        |   |
+|  |  - Per-series exponential backoff |
 |  +--------------------------------+   |
 |  +--------------------------------+   |
 |  |  Integration (integration.py)  |   |
 |  |  - Django models (direct)      |   |
 |  |  - Proxy URL generation        |   |
-|  |  - Episode hydration           |   |
+|  |  - Watermark queries           |   |
 |  +--------------------------------+   |
 +-----------------------------------------+
          |
@@ -141,13 +161,12 @@ Expose your Dispatcharr VOD library to Plex and similar clients as a mountable H
 
 #### Episode Hydration
 
-1. User browses /Series/All/Show Name/
-2. HTTP handler detects zero episodes
-3. Integration checks hydration cooldown (5 min)
-4. If not in cooldown, enqueues refresh_series_episodes task
-5. Task runs in background (Celery)
-6. Episodes fetched from M3U provider
-7. Next browse shows episodes
+1. Server startup: All zero-episode series queued immediately
+2. 5 concurrent hydration workers process series in parallel
+3. Episodes fetched from M3U provider via Celery tasks
+4. Per-series exponential backoff on failure (max 5 min)
+5. Global circuit breaker reduces concurrency on 8+ failures/min
+6. Episodes available in DB for lazy queries on access
 
 ### Configuration Settings
 
@@ -246,13 +265,14 @@ The filesystem mirrors Dispatcharr's VOD category model:
 /Series
     /All
         Show Name (2023)
-            /Season 01
-                Show Name (2023) - S01E01 - Episode Title.mkv
+            /S01
+                S01E01 - Episode Title - Provider.mkv
+                S01E02 - Episode Title 2 - Provider.mkv
 
     /Drama
         Show Name (2023)
-            /Season 01
-                Show Name (2023) - S01E01 - Episode Title.mkv
+            /S01
+                S01E01 - Episode Title - Provider.mkv
 ```
 
 **Key Points:**
@@ -292,17 +312,20 @@ All media playback is handled by Dispatcharr's proxy:
 
 ### Startup Hydration
 - Server starts immediately (uvicorn binds to port)
-- Library hydration runs in background thread
-- Directory listings are available before hydration completes
+- All zero-episode series queued immediately on startup
+- 5 concurrent hydration workers process series
+- Directory listings available before hydration completes
 - Hydrated entries appear progressively
 
-### Episode Hydration
-When browsing a Series directory that has zero episodes:
+### Episode Hydration Strategy
+Aggressive hydration with intelligent backoff:
 
-1. The plugin triggers `refresh_series_episodes` in the background
-2. Bounded concurrency prevents overwhelming Dispatcharr
-3. Per-series cooldown (5 minutes) prevents spam
-4. Episodes appear on the next browse
+1. **Immediate Queue**: All zero-episode series queued on startup
+2. **Concurrent Workers**: 5 workers process series in parallel
+3. **Per-Series Backoff**: Exponential backoff on failure (1s → 2s → 4s → ... → max 5 min)
+4. **Global Circuit Breaker**: Reduces concurrency when 8+ failures/min detected
+5. **No Cooldown on Success**: Series that hydrate successfully are not retried
+6. **DB Storage**: Episodes stored in Dispatcharr DB, queried lazily on access
 
 ## File Sizes
 
@@ -415,9 +438,12 @@ vodfs/
 ├── plugin.json            # Plugin manifest
 ├── plugin/
 │   ├── server.py          # FastAPI/uvicorn server entry point
-│   ├── tree.py            # Virtual filesystem tree
-│   ├── httpfs.py          # HTTP request handlers
-│   ├── integration.py     # Dispatcharr VOD integration
+│   ├── tree.py            # Virtual filesystem tree with lazy path resolution
+│   ├── httpfs.py          # HTTP request handlers with lazy queries + cache
+│   ├── integration.py     # Dispatcharr VOD integration + watermark queries
+│   ├── manifest.py        # Atomic manifest management (load/save/rebuild)
+│   ├── cache.py           # LRU cache for directory listings (5000 entries)
+│   ├── hydration.py       # Aggressive hydration scheduler with backoff
 │   ├── standalone_runner.py  # Child process bootstrap
 │   └── celery_worker.py   # Background task definitions
 ├── architecture/
