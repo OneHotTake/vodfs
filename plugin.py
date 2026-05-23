@@ -49,6 +49,13 @@ fields = [
         "type": "string",
         "default": "http://127.0.0.1:9191",
         "help_text": "Base URL of Dispatcharr instance (must be reachable from rclone/Plex)"
+    },
+    {
+        "id": "enable_auth",
+        "label": "Enable Authentication (Token-based)",
+        "type": "boolean",
+        "default": False,
+        "help_text": "When enabled, require valid Dispatcharr API key (Authorization: ApiKey <key> or X-API-Key: <key>). Default OFF for easy browser troubleshooting."
     }
 ]
 
@@ -164,8 +171,9 @@ class Plugin:
         port = settings.get("http_port", 8888)
         auto_hydrate = settings.get("auto_hydrate_empty_series", True)
         dispatcharr_base_url = settings.get("dispatcharr_base_url", "http://127.0.0.1:9191")
+        enable_auth = settings.get("enable_auth", False)
 
-        logger.info("Starting HTTP filesystem server on port %d", port)
+        logger.info("Starting HTTP filesystem server on port %d (auth: %s)", port, "enabled" if enable_auth else "disabled")
 
         # Start child process with Django-initialized server
         # Use direct file path since plugin module is loaded under a different name
@@ -196,6 +204,9 @@ class Plugin:
 
         # Pass Dispatcharr base URL to child process
         env["VODFS_DISPATCHARR_BASE_URL"] = dispatcharr_base_url.rstrip("/")
+
+        # Pass auth enable flag to child process
+        env["VODFS_ENABLE_AUTH"] = str(enable_auth).lower()
 
         try:
             # Redirect child output to log file for debugging
@@ -259,16 +270,26 @@ class Plugin:
     def _show_rclone_config(self, settings: Dict[str, Any]) -> Dict[str, Any]:
         """Generate rclone configuration"""
         port = settings.get("http_port", 8888)
+        enable_auth = settings.get("enable_auth", False)
 
-        config = f"""[vodfs]
+        if enable_auth:
+            config = f"""[vodfs]
+type = http
+url = http://127.0.0.1:{port}/
+headers = Authorization, ApiKey <your-dispatcharr-api-key>
+"""
+            message = "Add this to your rclone config file. Use any active Dispatcharr API key for authentication."
+        else:
+            config = f"""[vodfs]
 type = http
 url = http://127.0.0.1:{port}/
 """
+            message = "Add this to your rclone config file"
 
         return {
             "status": "ok",
             "config": config,
-            "message": "Add this to your rclone config file"
+            "message": message
         }
 
     def stop(self, context: Dict[str, Any]):
