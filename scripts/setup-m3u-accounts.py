@@ -16,8 +16,11 @@ if os.path.exists(env_file):
                 os.environ[key] = val
 
 DISPATCHARR_URL = "http://localhost:9191"
-USERNAME = os.environ.get("DISPATCHARR_ADMIN_USERNAME", "onehottake")
-PASSWORD = os.environ.get("DISPATCHARR_ADMIN_PASSWORD", "please")
+USERNAME = os.environ.get("DISPATCHARR_ADMIN_USERNAME")
+PASSWORD = os.environ.get("DISPATCHARR_ADMIN_PASSWORD")
+if not USERNAME or not PASSWORD:
+    print("ERROR: DISPATCHARR_ADMIN_USERNAME and DISPATCHARR_ADMIN_PASSWORD must be set")
+    sys.exit(1)
 
 MEGA_SERVER = os.environ.get("MEGA_SERVER", "")
 MEGA_USERNAME = os.environ.get("MEGA_USERNAME", "")
