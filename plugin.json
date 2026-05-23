@@ -29,6 +29,20 @@
       "type": "boolean",
       "default": true,
       "help_text": "Automatically fetch episodes when browsing Series directories"
+    },
+    {
+      "id": "dispatcharr_base_url",
+      "label": "Dispatcharr Base URL",
+      "type": "string",
+      "default": "http://127.0.0.1:9191",
+      "help_text": "Base URL of Dispatcharr instance (must be reachable from rclone/Plex)"
+    },
+    {
+      "id": "enable_auth",
+      "label": "Enable Authentication (Token-based)",
+      "type": "boolean",
+      "default": false,
+      "help_text": "When enabled, require valid Dispatcharr API key (Authorization: ApiKey <key> or X-API-Key: <key>). Default OFF for easy browser troubleshooting."
     }
   ],
   "actions": [
