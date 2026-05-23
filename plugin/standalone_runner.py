@@ -38,9 +38,14 @@ def run_server(port: int = 8888):
         logger.error("Cannot start server without Django")
         sys.exit(1)
 
-    # Now we can import our modules that depend on Django
-    from plugin.tree import VirtualTree
-    from plugin.server import create_app, run_server as _run_server
+    # Add plugin directory to path for imports
+    plugin_dir = os.path.dirname(os.path.abspath(__file__))
+    if plugin_dir not in sys.path:
+        sys.path.insert(0, plugin_dir)
+
+    # Now we can import our modules
+    from tree import VirtualTree
+    from server import create_app, run_server as _run_server
 
     logger.info("Starting HTTP filesystem server on port %d", port)
     _run_server(port)

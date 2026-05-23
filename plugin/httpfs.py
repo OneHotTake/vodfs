@@ -6,11 +6,18 @@ from fastapi import Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from jinja2 import Template
 from urllib.parse import quote
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
-from .tree import FSNode, DirectoryNode, FileNode, VirtualTree
+try:
+    from .tree import FSNode, DirectoryNode, FileNode, VirtualTree
+except ImportError:
+    from tree import FSNode, DirectoryNode, FileNode, VirtualTree
 
 
 logger = logging.getLogger(__name__)
+
+_executor = ThreadPoolExecutor(max_workers=4)
 
 
 class HTTPFilesystem:
@@ -40,9 +47,55 @@ class HTTPFilesystem:
             return RedirectResponse(url=f"{path}/", status_code=301)
 
         if node.is_directory():
+            # Check if this is a series directory that needs episode hydration
+            await self._maybe_hydrate_series(node)  # type: ignore[arg-type]
             return await self.serve_directory(node, path)  # type: ignore[arg-type]
         else:
             return await self.serve_file(node)  # type: ignore[arg-type]
+
+    async def _maybe_hydrate_series(self, node: DirectoryNode):
+        """Hydrate series directory with episodes on first access"""
+        if node.metadata.get("hydrated"):
+            logger.debug("Series already hydrated: %s", node.name)
+            return
+
+        series_uuid = node.metadata.get("series_uuid")
+        logger.debug("Checking series hydration: name=%s, uuid=%s, metadata_keys=%s", 
+                     node.name, series_uuid, list(node.metadata.keys()))
+        if not series_uuid:
+            logger.debug("No series_uuid found, skipping hydration")
+            return
+
+        try:
+            try:
+                from integration import DispatcharrIntegrator
+            except ImportError:
+                from .integration import DispatcharrIntegrator
+
+            loop = asyncio.get_event_loop()
+            episodes = await loop.run_in_executor(_executor, self._hydrate_episodes_sync, series_uuid)
+            logger.debug("Fetched %d episodes for series %s", len(episodes), series_uuid)
+            if episodes:
+                self.tree.hydrate_episodes(node, episodes)
+                logger.info("Hydrated %d episodes for series %s", len(episodes), series_uuid)
+            else:
+                logger.warning("No episodes found for series %s", series_uuid)
+        except Exception as e:
+            logger.error("Failed to hydrate series %s: %s", series_uuid, e)
+            import traceback
+            logger.error(traceback.format_exc())
+
+    def _hydrate_episodes_sync(self, series_uuid: str):
+        """Sync function to fetch episodes (runs in thread pool)"""
+        try:
+            from integration import DispatcharrIntegrator
+        except ImportError:
+            from .integration import DispatcharrIntegrator
+
+        integrator = DispatcharrIntegrator()
+        if integrator.is_available():
+            return integrator.get_series_episodes(series_uuid)
+        return []
 
     async def handle_head(self, path: str, request: Request) -> Response:
         """Handle HEAD request"""
@@ -56,6 +109,7 @@ class HTTPFilesystem:
             return RedirectResponse(url=f"{path}/", status_code=301)
 
         if node.is_directory():
+            await self._maybe_hydrate_series(node)  # type: ignore[arg-type]
             return Response(status_code=200, headers={"content-type": "text/html; charset=utf-8"})
         else:
             return await self.head_file(node)  # type: ignore[arg-type]
@@ -86,10 +140,11 @@ class HTTPFilesystem:
                 })
             else:
                 href = quote(child.name)
+                size = child.get_file_size()
                 entries.append({
                     "name": child.name,
                     "href": href,
-                    "size": child.get_file_size()
+                    "size": self._format_size(size) if size else ""
                 })
 
         html = self._render_directory_html(path, entries)
@@ -118,6 +173,20 @@ class HTTPFilesystem:
             headers["Last-Modified"] = node.metadata["last_modified"]
 
         return Response(status_code=200, headers=headers)
+
+    @staticmethod
+    def _format_size(size_bytes: int) -> str:
+        """Convert bytes to human-readable size"""
+        if size_bytes == 0:
+            return ""
+        size = float(size_bytes)
+        for unit in ["B", "KB", "MB", "GB", "TB"]:
+            if size < 1024.0:
+                if unit == "B":
+                    return f"{int(size)}"
+                return f"{size:.1f} {unit}"
+            size /= 1024.0
+        return f"{size:.1f} PB"
 
     def _render_directory_html(self, path: str, entries: list) -> str:
         """Render directory listing HTML"""

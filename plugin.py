@@ -42,6 +42,13 @@ fields = [
         "type": "boolean",
         "default": True,
         "help_text": "Automatically fetch episodes when browsing Series directories"
+    },
+    {
+        "id": "dispatcharr_base_url",
+        "label": "Dispatcharr Base URL",
+        "type": "string",
+        "default": "http://127.0.0.1:9191",
+        "help_text": "Base URL of Dispatcharr instance (must be reachable from rclone/Plex)"
     }
 ]
 
@@ -156,13 +163,22 @@ class Plugin:
         # Get settings
         port = settings.get("http_port", 8888)
         auto_hydrate = settings.get("auto_hydrate_empty_series", True)
+        dispatcharr_base_url = settings.get("dispatcharr_base_url", "http://127.0.0.1:9191")
 
         logger.info("Starting HTTP filesystem server on port %d", port)
 
         # Start child process with Django-initialized server
-        # The standalone_runner calls django.setup() before importing models
+        # Use direct file path since plugin module is loaded under a different name
+        plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        # standalone_runner.py is in the plugin/ subdirectory
+        plugin_subdir = os.path.join(plugin_dir, "plugin")
+        runner_path = os.path.join(plugin_subdir, "standalone_runner.py")
+
+        # Use the Dispatcharr Python environment which has all dependencies
+        python_exe = sys.executable  # This is the Dispatcharr Python
+
         cmd = [
-            sys.executable, "-m", "plugin.standalone_runner",
+            python_exe, runner_path,
             "--port", str(port)
         ]
 
@@ -171,14 +187,27 @@ class Plugin:
         if "DJANGO_SETTINGS_MODULE" not in env:
             env["DJANGO_SETTINGS_MODULE"] = "dispatcharr.settings"
 
+        # Add Dispatcharr app directory to PYTHONPATH
+        app_dir = "/app"
+        if "PYTHONPATH" not in env:
+            env["PYTHONPATH"] = app_dir
+        else:
+            env["PYTHONPATH"] = f"{app_dir}:{env['PYTHONPATH']}"
+
+        # Pass Dispatcharr base URL to child process
+        env["VODFS_DISPATCHARR_BASE_URL"] = dispatcharr_base_url.rstrip("/")
+
         try:
-            process = subprocess.Popen(
-                cmd,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=True  # Detach from parent process
-            )
+            # Redirect child output to log file for debugging
+            log_file = os.path.join(plugin_subdir, "server.log")
+            with open(log_file, "a") as log:
+                process = subprocess.Popen(
+                    cmd,
+                    env=env,
+                    stdout=log,
+                    stderr=log,
+                    start_new_session=True  # Detach from parent process
+                )
 
             # Save PID for graceful shutdown
             self._save_pid(process.pid)

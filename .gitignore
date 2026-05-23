@@ -42,6 +42,7 @@ htmlcov/
 /data/
 *.pid
 *.log
+server.pid
 
 # OS
 .DS_Store
@@ -50,6 +51,23 @@ Thumbs.db
 # AI session files (keep templates)
 .ai/sprint-*.md
 .ai/archive/
+.ai/sprints/
 
 # But keep current sprint
 !.ai/sprint-100.md
+
+# Secrets and credentials
+.env.secrets
+.env
+.env.*
+*.env
+*.secret
+credentials.json
+secrets/
+
+# Local config overrides
+config.local.json
+*.local.*
+
+# rclone config (may contain tokens)
+rclone.conf

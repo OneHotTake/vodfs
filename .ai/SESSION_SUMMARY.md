@@ -1,39 +1,21 @@
-# Session Summary
+## Session: Sprint 114 - Proxy URLs & Playback Fix
 
-## Token Ledger
+### Changes Made
+1. **plugin.py**: Added `dispatcharr_base_url` setting (default: `http://127.0.0.1:9191`)
+2. **plugin/integration.py**: Updated `get_all_movies()` and `get_series_episodes()` to generate full proxy URLs using `_get_dispatcharr_base_url()`
+3. **plugin/tree.py**: Fixed movie size not being passed to `add_file()` (was causing 0-byte files)
+4. **plugin/server.py**: Moved hydration to background thread so server starts immediately
+5. **plugin/httpfs.py**: Reverted to 302 redirects (proxy streaming was buffering entire files)
 
-| Session | Model | Tokens | Files Changed | Build Status |
-|---------|-------|--------|---------------|--------------|
-| setup | Sonnet | ~8,500 | 29 files created | OK |
-| sprint-101 | Sonnet | ~2,000 | 5 files updated | OK |
-| sprint-102 | Sonnet | ~2,500 | 5 files updated | OK |
-| sprints 103-105 | Sonnet | ~4,000 | 6 files updated | OK |
-| sprints 106-112 | Sonnet | ~8,000 | 11 files updated | OK |
+### Key Fix
+- Set `dispatcharr_base_url` to container IP (`http://172.19.0.2:9191`) so rclone can reach the proxy from the host
 
-**Total tokens this sprint:** ~25,000
+### Result
+- ✅ rclone mount stable at `/tmp/vodfs`
+- ✅ Plex playback works via 302 redirect chain
+- ✅ STRONG provider movies stream successfully
+- ⚠️ Some MEGA provider content returns 403 (provider-side block)
 
-**Tokens saved vs. previous pattern:** Estimated 30% (parallel exploration vs. sequential)
-
-## Changes This Session
-
-- **sprint-101:** GitHub repository setup
-  - Created GitHub repository at https://github.com/OneHotTake/vodfs
-  - Added remote origin and pushed initial commit
-  - Created missing steering files (REPO_MAP.md, TOKEN_BUDGET.md, BACKLOG.md)
-  - Created sprint-101.md planning document
-  - Updated CURRENT_TASK.md with sprint-101 completion
-
-## Cumulative Project Status
-
-- Created complete project structure (29 files)
-- Established project management infrastructure (CLAUDE.md, BACKLOG.md, etc.)
-- Implemented plugin skeleton with run/stop hooks
-- Created virtual filesystem tree implementation
-- Created HTTP request handlers
-- Created Dispatcharr integration layer
-- Documented architecture (OVERVIEW, HTTPFS, HYDRATION)
-- Created comprehensive user and developer docs
-- Set up test framework with unit tests
-- Created sprint planning for 12 sprints
-- Initialized GitHub repository and pushed initial commits
-- **All sprint-101 tasks completed and pushed**
+### Next Steps
+- Consider adding multi-provider fallback in Dispatcharr proxy
+- Monitor for any remaining 403 issues with MEGA content

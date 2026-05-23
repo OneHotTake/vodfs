@@ -82,20 +82,6 @@ class DirectoryNode(FSNode):
 class VirtualTree:
     """Virtual filesystem tree builder"""
 
-    # Default category directories
-    DEFAULT_CATEGORIES = [
-        "Action",
-        "Comedy",
-        "Drama",
-        "Horror",
-        "SciFi",
-        "Documentary",
-        "Thriller",
-        "Romance",
-        "Animation",
-        "Fantasy"
-    ]
-
     def __init__(self):
         self.root = DirectoryNode("")
         self._movies_root = None
@@ -103,21 +89,15 @@ class VirtualTree:
         self._movies_all = None
         self._series_all = None
 
-    def build(self, categories=None):
-        """Build the complete virtual tree"""
+    def build(self):
+        """Build the complete virtual tree structure (categories added during hydration)"""
         # Create top-level directories
         self._movies_root = self.root.add_directory("Movies")
         self._series_root = self.root.add_directory("Series")
 
-        # Create All directories as siblings to categories
+        # Create All directories
         self._movies_all = self._movies_root.add_directory("All")
         self._series_all = self._series_root.add_directory("All")
-
-        # Create category directories
-        cats = categories or self.DEFAULT_CATEGORIES
-        for category in cats:
-            self._movies_root.add_directory(category)
-            self._series_root.add_directory(category)
 
     def resolve_path(self, path: str) -> Optional[FSNode]:
         """Resolve a filesystem path to a node"""
@@ -161,15 +141,15 @@ class VirtualTree:
             title = movie.get("name", "Unknown")
             year = movie.get("year", 0)
             uuid = movie.get("uuid", "")
-            genre = movie.get("genre", "")
+            categories = movie.get("categories", [])
             streams = movie.get("streams", [])
 
-            # Add to All directory and categories
             for stream in streams:
                 stream_url = stream.get("stream_url", "")
                 stream_id = stream.get("stream_id", "")
                 account_name = stream.get("account_name", "Unknown")
                 ext = stream.get("extension", "mkv")
+                size = stream.get("size", 0)
 
                 # Build filename using integrator if available
                 if integrator:
@@ -179,20 +159,20 @@ class VirtualTree:
 
                 # Add to All directory
                 if self._movies_all:
-                    self._movies_all.add_file(filename, stream_url)
+                    self._movies_all.add_file(filename, stream_url, size)
 
-                # Add to genre category if it exists
-                if genre and self._movies_root:
-                    cat_dir = self._movies_root.find_child(genre)
-                    if cat_dir and cat_dir.is_directory():
-                        cat_dir.add_file(filename, stream_url)  # type: ignore[arg-type]
+                # Add to each category this movie belongs to
+                for category in categories:
+                    if category and self._movies_root:
+                        cat_dir = self._movies_root.add_directory(category)
+                        cat_dir.add_file(filename, stream_url, size)  # type: ignore[arg-type]
 
         # Hydrate series
         for show in series:
             title = show.get("name", "Unknown")
             year = show.get("year", 0)
             uuid = show.get("uuid", "")
-            genre = show.get("genre", "")
+            categories = show.get("categories", [])
             providers = show.get("providers", [])
 
             # Create series directory in All
@@ -204,10 +184,10 @@ class VirtualTree:
                 # Store provider info for episode hydration
                 show_dir.metadata["providers"] = providers
 
-            # Add to genre category if it exists
-            if genre and self._series_root:
-                cat_dir = self._series_root.find_child(genre)
-                if cat_dir and cat_dir.is_directory():
+            # Add to each category this series belongs to
+            for category in categories:
+                if category and self._series_root:
+                    cat_dir = self._series_root.add_directory(category)
                     cat_dir.add_directory(f"{title} ({year})")  # type: ignore[union-attr]
 
     def hydrate_episodes(self, series_dir: 'DirectoryNode', episodes: list):
@@ -215,19 +195,23 @@ class VirtualTree:
         seasons = {}
 
         for episode in episodes:
-            season_num = episode.get("seasonNumber", 0)
-            episode_num = episode.get("episodeNumber", 0)
-            episode_title = episode.get("title", f"Episode {episode_num}")
-            episode_id = episode.get("id", 0)
-            size = episode.get("size", 0)
+            season_num = episode.get("season_number", 0)
+            episode_num = episode.get("episode_number", 0)
+            episode_title = episode.get("name", f"Episode {episode_num}")
+            streams = episode.get("streams", [])
 
             season_key = f"S{season_num:02d}"
             if season_key not in seasons:
                 seasons[season_key] = series_dir.add_directory(season_key)
 
-            filename = f"{season_key}E{episode_num:02d} - {episode_title}.mkv"
-            stream_url = f"/api/v3/stream/episode/{episode_id}"
-            seasons[season_key].add_file(filename, stream_url, size)
+            # Create file for each stream
+            for stream in streams:
+                stream_url = stream.get("stream_url", "")
+                ext = stream.get("extension", "mkv")
+                account = stream.get("account_name", "Unknown")
+                size = stream.get("size", 0)
+                filename = f"{season_key}E{episode_num:02d} - {episode_title} - {account}.{ext}"
+                seasons[season_key].add_file(filename, stream_url, size)
 
         # Mark series as hydrated
         series_dir.metadata["hydrated"] = True

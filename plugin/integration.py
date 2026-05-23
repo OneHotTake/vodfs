@@ -1,5 +1,6 @@
 """Dispatcharr VOD integration"""
 
+import os
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -10,7 +11,8 @@ from collections import defaultdict
 # We'll handle import errors gracefully during development
 try:
     from apps.vod.models import Movie, Series, Episode, VODCategory
-    from apps.m3u.models import M3UAccount, M3UMovieRelation, M3USeriesRelation, M3UEpisodeRelation
+    from apps.vod.models import M3UMovieRelation, M3USeriesRelation, M3UEpisodeRelation
+    from apps.m3u.models import M3UAccount
     from apps.vod.tasks import refresh_series_episodes
     DJANGO_AVAILABLE = True
 except ImportError:
@@ -21,6 +23,11 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _get_dispatcharr_base_url() -> str:
+    """Get Dispatcharr base URL from environment variable"""
+    return os.environ.get("VODFS_DISPATCHARR_BASE_URL", "http://127.0.0.1:9191").rstrip("/")
 
 
 class DispatcharrIntegrator:
@@ -41,22 +48,43 @@ class DispatcharrIntegrator:
             logger.warning("Django models not available")
             return []
 
+        base_url = _get_dispatcharr_base_url()
         movies = Movie.objects.all().select_related('logo')
 
         result = []
         for movie in movies:
-            # Get M3U relations for streaming URLs
-            relations = M3UMovieRelation.objects.filter(movie=movie)
+            # Get M3U relations for streaming URLs and categories
+            relations = M3UMovieRelation.objects.filter(movie=movie).select_related('category')
 
             streams = []
+            categories = []
             for rel in relations:
-                stream_url = rel.get_stream_url()
+                # Use Dispatcharr proxy URL instead of direct provider URL
+                stream_url = f"{base_url}/proxy/vod/movie/{movie.uuid}?stream_id={rel.stream_id}"
+                # Estimate size from duration or use default
+                # Most movies are 90-120 min, use 100 min (6000s) default at ~2 Mbps
+                size = 0
+                if movie.duration_secs:
+                    size = movie.duration_secs * 250 * 1024  # bytes
+                elif rel.custom_properties:
+                    detailed = rel.custom_properties.get("detailed_info", {})
+                    if detailed and "duration_secs" in detailed:
+                        size = detailed["duration_secs"] * 250 * 1024
+                    else:
+                        size = 6000 * 250 * 1024  # 100 min default
+                else:
+                    size = 6000 * 250 * 1024  # 100 min default
+
                 streams.append({
                     "stream_id": rel.stream_id,
                     "account_name": rel.m3u_account.name if rel.m3u_account else "Unknown",
                     "stream_url": stream_url,
-                    "extension": rel.container_extension or "mkv"
+                    "extension": rel.container_extension or "mkv",
+                    "size": size
                 })
+                # Collect category names
+                if rel.category:
+                    categories.append(rel.category.name)
 
             result.append({
                 "uuid": str(movie.uuid),
@@ -65,7 +93,8 @@ class DispatcharrIntegrator:
                 "description": movie.description,
                 "rating": movie.rating,
                 "genre": movie.genre,
-                "streams": streams
+                "streams": streams,
+                "categories": categories
             })
 
         return result
@@ -84,14 +113,18 @@ class DispatcharrIntegrator:
             episode_count = series.episodes.count()
 
             # Get M3U relations
-            relations = M3USeriesRelation.objects.filter(series=series)
+            relations = M3USeriesRelation.objects.filter(series=series).select_related('category')
 
             providers = []
+            categories = []
             for rel in relations:
                 providers.append({
                     "account_name": rel.m3u_account.name if rel.m3u_account else "Unknown",
                     "external_series_id": rel.external_series_id
                 })
+                # Collect category names
+                if rel.category:
+                    categories.append(rel.category.name)
 
             result.append({
                 "uuid": str(series.uuid),
@@ -101,7 +134,8 @@ class DispatcharrIntegrator:
                 "rating": series.rating,
                 "genre": series.genre,
                 "episode_count": episode_count,
-                "providers": providers
+                "providers": providers,
+                "categories": categories
             })
 
         return result
@@ -118,6 +152,7 @@ class DispatcharrIntegrator:
             logger.warning("Series %s not found", series_uuid)
             return []
 
+        base_url = _get_dispatcharr_base_url()
         episodes = series.episodes.all().order_by('season_number', 'episode_number')
 
         result = []
@@ -127,12 +162,21 @@ class DispatcharrIntegrator:
 
             streams = []
             for rel in relations:
-                stream_url = rel.get_stream_url()
+                # Use Dispatcharr proxy URL instead of direct provider URL
+                stream_url = f"{base_url}/proxy/vod/episode/{episode.uuid}"
+
+                # Estimate size from duration (if available)
+                # Typical streaming bitrate: ~2 Mbps = 250 KB/s
+                size = 0
+                if episode.duration_secs:
+                    size = episode.duration_secs * 250 * 1024  # bytes
+
                 streams.append({
                     "stream_id": rel.stream_id,
                     "account_name": rel.m3u_account.name if rel.m3u_account else "Unknown",
                     "stream_url": stream_url,
-                    "extension": rel.container_extension or "mkv"
+                    "extension": rel.container_extension or "mkv",
+                    "size": size
                 })
 
             result.append({
@@ -221,10 +265,11 @@ class DispatcharrIntegrator:
 
     def get_proxy_url(self, content_type: str, uuid: str, stream_id: str) -> str:
         """Generate Dispatcharr proxy URL for content"""
+        base_url = _get_dispatcharr_base_url()
         if content_type == "movie":
-            return f"/proxy/vod/movie/{uuid}?stream_id={stream_id}"
+            return f"{base_url}/proxy/vod/movie/{uuid}?stream_id={stream_id}"
         elif content_type == "episode":
-            return f"/proxy/vod/episode/{uuid}?stream_id={stream_id}"
+            return f"{base_url}/proxy/vod/episode/{uuid}?stream_id={stream_id}"
         else:
             raise ValueError(f"Unknown content type: {content_type}")
 
