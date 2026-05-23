@@ -42,7 +42,7 @@
       "label": "Enable Authentication (Token-based)",
       "type": "boolean",
       "default": false,
-      "help_text": "When enabled, require valid Dispatcharr API key (Authorization: ApiKey <key> or X-API-Key: <key>). Default OFF for easy browser troubleshooting."
+      "help_text": "When enabled, require a valid Dispatcharr API key via Authorization: ApiKey <key> or X-API-Key: <key> header. Default OFF for easy browser troubleshooting and initial setup."
     }
   ],
   "actions": [

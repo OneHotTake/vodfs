@@ -2,6 +2,8 @@
 
 Expose your Dispatcharr VOD library to Plex and similar clients as a mountable HTTP filesystem using rclone.
 
+> **Security note:** vodfs fully inherits Dispatcharr's network access rules and uses your existing API key for authentication. See the [Security & Access Control](#security--access-control) section for details.
+
 ## Features
 
 - **Virtual HTTP Filesystem**: Browse your VOD library as a directory structure
@@ -153,7 +155,8 @@ Expose your Dispatcharr VOD library to Plex and similar clients as a mountable H
 |---------|-------------|---------|
 | **HTTP Port** | Port for the HTTP filesystem server | 8888 |
 | **Auto-hydrate Empty Series** | Automatically fetch episodes when browsing | true |
-| **Dispatcharr Base URL** | Base URL of Dispatcharr instance (must be reachable from rclone/Plex) | http://127.0.0.1:9191 |
+| **Dispatcharr Base URL** | Base URL of Dispatcharr instance (used for internal proxy redirects). Usually left at default. | http://127.0.0.1:9191 |
+| **Enable Authentication (Token-based)** | Require valid Dispatcharr API key for access | false |
 
 ### Actions
 
@@ -196,6 +199,14 @@ url = http://127.0.0.1:8888/
 > [vodfs]
 > type = http
 > url = http://172.19.0.2:8888/
+> ```
+
+> **Authentication**: If you enabled "Enable Authentication (Token-based)" in plugin settings, add your API key:
+> ```ini
+> [vodfs]
+> type = http
+> url = http://127.0.0.1:8888/
+> headers = Authorization, ApiKey YOUR_DISPATCHARR_API_KEY_HERE
 > ```
 
 Mount the filesystem:
@@ -306,12 +317,48 @@ When browsing a Series directory that has zero episodes:
 - rclone (for mounting)
 - Active M3U provider(s) configured in Dispatcharr
 
-## Security
+## Security & Access Control
 
-- HTTP server binds to `0.0.0.0` inside container (accessible via Docker port mapping)
-- Dispatcharr credentials never exposed in logs
-- All streaming goes through Dispatcharr's proxy infrastructure
-- M3U credentials stored in `.env.secrets` (gitignored)
+**vodfs is a lightweight plugin that re-uses Dispatcharr's existing security model 100%.**  
+It creates **no new users, passwords, tokens, or credential storage** — everything is inherited directly from Dispatcharr.
+
+### 1. Network Access (automatic)
+vodfs automatically respects your existing **Dispatcharr → Settings → Network Access → Stream Endpoints** rules.  
+If you have restricted streaming to your LAN or specific IP/CIDR ranges, vodfs enforces exactly the same limits with zero extra configuration.
+
+### 2. Authentication (optional, token-based)
+- Authentication is **turned OFF by default**.  
+  This makes initial testing and troubleshooting extremely simple — just open the filesystem URL in your browser and browse your entire library instantly.
+- When you are ready for production, enable **"Enable Authentication (Token-based)"** in the plugin settings.
+- It uses your **existing Dispatcharr API key** (the same one already shown in your user profile). No new secrets to manage.
+
+**rclone configuration when authentication is enabled:**
+```ini
+[vodfs]
+type = http
+url = http://your-dispatcharr-host:8888/
+headers = Authorization, ApiKey YOUR_DISPATCHARR_API_KEY_HERE
+# Alternative header (also supported):
+# headers = X-API-Key, YOUR_DISPATCHARR_API_KEY_HERE
+```
+
+### 3. Logging & Credential Exposure
+- **The vodfs plugin itself never logs any credentials** — not in its own logs, not in uvicorn access logs, and not even at debug level.
+- Playback flow (what actually happens):
+  1. vodfs returns a simple `302` redirect to Dispatcharr's internal proxy URL (`/proxy/vod/...`). This URL contains **only** a UUID and stream ID — **no** username or password.
+  2. Dispatcharr then **streams the video bytes server-side** using `StreamingHttpResponse`.
+- **Key security benefit**: rclone and any media player **never receive or see the real IPTV provider URL** that contains your `username` and `password`. Those credentials stay entirely inside the Dispatcharr process and are never transmitted to the client.
+
+The **only** place IPTV credentials may appear is inside **Dispatcharr's own VOD proxy logs** (at INFO level). This is standard Dispatcharr behavior and unrelated to vodfs.
+
+### Summary
+This architecture gives you:
+- Full reuse of Dispatcharr's network rules and authentication
+- Zero credential leakage to rclone, players, or external logs
+- Lightweight operation (no unnecessary byte proxying through the plugin)
+- Easy debugging (leave auth off while testing)
+
+Once testing is complete, simply enable authentication in the plugin settings and vodfs becomes fully protected by the same security model Dispatcharr already provides.
 
 ## Troubleshooting
 
