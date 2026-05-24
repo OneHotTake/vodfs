@@ -48,13 +48,12 @@ server.pid
 .DS_Store
 Thumbs.db
 
-# AI session files (keep templates)
-.ai/sprint-*.md
-.ai/archive/
-.ai/sprints/
+# AI session scaffolding (kept on disk, not in git)
+/.ai/
+/CLAUDE.md
 
-# But keep current sprint
-!.ai/sprint-100.md
+# Local dev helpers (kept on disk, not in git)
+/scripts/
 
 # Secrets and credentials
 .env.secrets

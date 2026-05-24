@@ -21,8 +21,7 @@ vodfs/
 │   ├── tree.py              # Virtual path resolution; live DB lookups
 │   ├── integration.py       # Dispatcharr model integration
 │   └── cache.py             # In-memory TTL/LRU cache for directory listings
-├── docs/                    # OVERVIEW.md, HTTPFS.md, DEV_GUIDE.md, TROUBLESHOOTING.md
-└── scripts/                 # Helper scripts
+└── docs/                    # OVERVIEW.md, HTTPFS.md, DEV_GUIDE.md, TROUBLESHOOTING.md
 ```
 
 ## Running Locally
