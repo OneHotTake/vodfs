@@ -203,6 +203,7 @@ class Plugin:
         """Generate rclone configuration"""
         port = settings.get("http_port", 8888)
         enable_auth = settings.get("enable_auth", False)
+        config_url = f"http://127.0.0.1:{port}/rclone_conf"
 
         if enable_auth:
             config = f"""# VODFS rclone remote
@@ -221,7 +222,7 @@ type = http
 url = http://127.0.0.1:{port}/
 headers = Authorization, ApiKey <your-dispatcharr-api-key>
 """
-            message = "Add this to your rclone config file. Use any active Dispatcharr API key for authentication."
+            message = f"Open {config_url} for a copy/paste rclone config. Use any active Dispatcharr API key for authentication."
         else:
             config = f"""# VODFS rclone remote
 # Paste this block into your rclone.conf file.
@@ -239,10 +240,11 @@ type = http
 url = http://127.0.0.1:{port}/
 # headers = Authorization, ApiKey <your-dispatcharr-api-key>
 """
-            message = "Add this to your rclone config file"
+            message = f"Open {config_url} for a copy/paste rclone config."
 
         return {
             "status": "ok",
+            "url": config_url,
             "config": config,
             "message": message
         }

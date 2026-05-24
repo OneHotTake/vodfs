@@ -19,3 +19,14 @@
 ### Next Steps
 - Consider adding multi-provider fallback in Dispatcharr proxy
 - Monitor for any remaining 403 issues with MEGA content
+
+## Session: Rclone Config Endpoint
+
+### Changes Made
+1. **plugin/server.py**: Added hidden `GET /rclone_conf` endpoint returning plain-text rclone config, mount command, Plex paths, and API key guidance.
+2. **plugin.py**: Updated `show_rclone_config` action message to point users to `/rclone_conf`.
+3. Reverted the local Dispatcharr frontend copy-panel patch and rebuilt the container frontend from reverted source.
+
+### Verification
+- `/rclone_conf` returns copy/paste-ready text with request host in the `url =` line.
+- VODFS child server restarted and endpoint verified after Dispatcharr container restart.

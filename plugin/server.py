@@ -80,6 +80,34 @@ def _check_django_available():
     _server_ready = True
 
 
+def _build_rclone_config(base_url: str) -> str:
+    """Build copy/paste-ready rclone config and mount notes."""
+    base_url = base_url.rstrip("/") + "/"
+    if _ENABLE_AUTH:
+        auth_note = "# Secured installs: replace <your-dispatcharr-api-key> with an active Dispatcharr API key."
+        auth_line = "headers = Authorization, ApiKey <your-dispatcharr-api-key>"
+    else:
+        auth_note = "# Secured installs: enable plugin auth, then uncomment the headers line and replace the placeholder."
+        auth_line = "# headers = Authorization, ApiKey <your-dispatcharr-api-key>"
+
+    return f"""# VODFS rclone remote
+# Paste the [vodfs] block into your rclone.conf file.
+# Suggested mount point: /mnt/vodfs
+# Mount command:
+#   mkdir -p /mnt/vodfs
+#   rclone mount vodfs: /mnt/vodfs --allow-other --vfs-cache-mode off --dir-cache-time 5s --poll-interval 0
+# Plex library paths:
+#   Movies: /mnt/vodfs/Movies/All
+#   Series: /mnt/vodfs/Series/All
+{auth_note}
+
+[vodfs]
+type = http
+url = {base_url}
+{auth_line}
+"""
+
+
 def create_app(tree: VirtualTree) -> FastAPI:
     """Create FastAPI application with HTTP filesystem handlers"""
     @asynccontextmanager
@@ -133,6 +161,18 @@ def create_app(tree: VirtualTree) -> FastAPI:
                 "startup_errors": _startup_errors
             }
         })
+
+    @app.get("/rclone_conf")
+    async def rclone_conf(
+        request: Request,
+        _network=Depends(check_network_access),
+        _auth=Depends(check_api_key_auth),
+    ):
+        """Return copy/paste-ready rclone configuration."""
+        return Response(
+            content=_build_rclone_config(str(request.base_url)),
+            media_type="text/plain; charset=utf-8",
+        )
 
     @app.api_route("/{path:path}", methods=["GET", "HEAD"])
     async def handle_request(
