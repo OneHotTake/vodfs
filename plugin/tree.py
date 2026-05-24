@@ -140,7 +140,7 @@ class VirtualTree:
         return None
 
     def _resolve_movies_path(self, components: List[str]) -> Optional[FSNode]:
-        """Resolve Movies path"""
+        """Resolve Movies path with individual movie folders"""
         # /Movies/All/
         if len(components) == 1 and components[0] == "All":
             if not self._movies_root:
@@ -159,21 +159,148 @@ class VirtualTree:
                 cat_dir = self._movies_root.add_directory(category)
             return cat_dir
 
-        # /Movies/All/{MovieFile} or /Movies/{Category}/{MovieFile}
-        if len(components) >= 2:
-            filename = components[-1]
-            parent = self._resolve_movies_path(components[:-1])
-            if parent and isinstance(parent, DirectoryNode):
-                existing = parent.find_child(filename)
-                if existing:
-                    return existing
-            category = None if components[0] == "All" else components[0]
-            file_node = self._resolve_movie_by_filename(filename, category)
-            if file_node:
-                if parent and isinstance(parent, DirectoryNode):
-                    parent.add_child(file_node)
-                return file_node
+        # /Movies/All/{MovieFolder}/ or /Movies/{Category}/{MovieFolder}/
+        if len(components) == 2:
+            movie_folder_name = components[1]
+            parent = self._resolve_movies_path([components[0]])
+            if not parent or not isinstance(parent, DirectoryNode):
+                return None
+
+            # Check if folder already exists
+            existing = parent.find_child(movie_folder_name)
+            if existing:
+                return existing
+
+            # Parse folder name: "Title (Year) {tmdb-XXX}"
+            # Extract title, year, tmdb_id
+            import re
+            folder_match = re.match(r'^(.+?)\s*\((\d{4})\)(?:\s*\{tmdb-(\d+)\})?$', movie_folder_name)
+            if folder_match:
+                title, year, tmdb_id = folder_match.groups()
+                category = None if components[0] == "All" else components[0]
+                movie_folder = self._resolve_movie_folder(title, int(year), tmdb_id, category)
+                if movie_folder:
+                    parent.add_child(movie_folder)
+                    return movie_folder
+
             return None
+
+        # /Movies/All/{MovieFolder}/{Filename}
+        if len(components) == 3:
+            parent = self._resolve_movies_path(components[:2])
+            if not parent or not isinstance(parent, DirectoryNode):
+                return None
+
+            filename = components[2]
+            existing = parent.find_child(filename)
+            if existing:
+                return existing
+
+            # Parse filename to get stream_id: "Title (Year) {tmdb-XXX} - 12345.mkv"
+            import re
+            file_match = re.match(r'^(.+?)\s*\((\d{4})\)(?:\s*\{tmdb-\d+\})?\s*-\s*(\d+)\.\w+$', filename)
+            if file_match:
+                title, year, stream_id = file_match.groups()
+                category = None if components[0] == "All" else components[0]
+                file_node = self._resolve_movie_by_filename(title, int(year), stream_id, category)
+                if file_node:
+                    parent.add_child(file_node)
+                    return file_node
+
+            return None
+
+        return None
+
+    def _resolve_movie_folder(self, title: str, year: int, tmdb_id: str | None, category: str | None) -> Optional[DirectoryNode]:
+        """Resolve a movie folder by querying DB and create with files"""
+        try:
+            from apps.vod.models import M3UMovieRelation
+            from django.db.models import F, Q
+        except ImportError:
+            return None
+
+        # Build query
+        query = Q(movie__year=year)
+        if tmdb_id:
+            query &= Q(movie__tmdb_id=tmdb_id)
+        else:
+            # Try to match title in provider name
+            query &= Q(movie__name__contains=title)
+
+        relations = M3UMovieRelation.objects.filter(
+            query,
+            category__m3u_relations__enabled=True,
+            category__m3u_relations__m3u_account=F("m3u_account"),
+        ).select_related('movie', 'category', 'm3u_account').distinct()
+
+        if category:
+            relations = relations.filter(category__name=category)
+
+        if not relations:
+            return None
+
+        # Create folder node
+        base_url = _get_dispatcharr_base_url()
+        integrator = DispatcharrIntegrator()
+        movie = relations[0].movie
+        tmdb_id_val = movie.tmdb_id if hasattr(movie, 'tmdb_id') else None
+
+        # Build folder name
+        folder_name = integrator.build_folder_name(movie.name, movie.year, tmdb_id_val)
+        movie_folder = DirectoryNode(folder_name)
+        movie_folder.metadata["movie_uuid"] = str(movie.uuid)
+
+        # Add file(s) to folder (one per stream)
+        for rel in relations:
+            stream_url = f"{base_url}/proxy/vod/movie/{movie.uuid}?stream_id={rel.stream_id}"
+            size = (movie.duration_secs or 6000) * 250 * 1024
+
+            filename = integrator.build_filename(
+                movie.name, movie.year, "", rel.stream_id,
+                rel.container_extension or "mkv", tmdb_id_val
+            )
+
+            file_node = FileNode(filename, stream_url, size, "video/x-matroska")
+            movie_folder.add_child(file_node)
+
+        return movie_folder
+
+    def _resolve_movie_by_filename(self, title: str, year: int, stream_id: str, category: Optional[str] = None) -> Optional[FileNode]:
+        """Resolve a movie file by title, year, and stream_id via DB lookup"""
+        try:
+            from apps.vod.models import M3UMovieRelation
+            from django.db.models import F, Q
+        except ImportError:
+            return None
+
+        base_url = _get_dispatcharr_base_url()
+        integrator = DispatcharrIntegrator()
+
+        # Build query
+        query = Q(movie__year=year, stream_id=stream_id)
+        if title:
+            query &= Q(movie__name__contains=title)
+
+        relations = M3UMovieRelation.objects.filter(
+            query,
+            category__m3u_relations__enabled=True,
+            category__m3u_relations__m3u_account=F("m3u_account"),
+        ).select_related('movie', 'm3u_account', 'category').distinct()
+
+        if category:
+            relations = relations.filter(category__name=category)
+
+        for rel in relations:
+            tmdb_id_val = rel.movie.tmdb_id if hasattr(rel.movie, 'tmdb_id') else None
+
+            filename = integrator.build_filename(
+                rel.movie.name, rel.movie.year, "", rel.stream_id,
+                rel.container_extension or "mkv", tmdb_id_val
+            )
+
+            stream_url = f"{base_url}/proxy/vod/movie/{rel.movie.uuid}?stream_id={rel.stream_id}"
+            size = (rel.movie.duration_secs or 6000) * 250 * 1024
+            return FileNode(filename, stream_url, size, "video/x-matroska")
 
         return None
 
@@ -285,8 +412,8 @@ class VirtualTree:
             ).values_list('name', flat=True).distinct().order_by('name')
         )
 
-    def get_movies_from_db(self, category: Optional[str] = None) -> List[FileNode]:
-        """Get movies from DB (live query, only enabled categories)"""
+    def get_movies_from_db(self, category: Optional[str] = None) -> List[DirectoryNode]:
+        """Get movie folders from DB (live query, only enabled categories)"""
         try:
             from integration import DispatcharrIntegrator
         except ImportError:
@@ -312,88 +439,79 @@ class VirtualTree:
         if category:
             relations = relations.filter(category__name=category)
 
-        result = []
+        # Group by movie UUID
+        movies_map = {}
         for rel in relations:
-            stream_url = f"{base_url}/proxy/vod/movie/{rel.movie.uuid}?stream_id={rel.stream_id}"
+            movie_uuid = str(rel.movie.uuid)
+            if movie_uuid not in movies_map:
+                movies_map[movie_uuid] = {
+                    'movie': rel.movie,
+                    'relations': []
+                }
+            movies_map[movie_uuid]['relations'].append(rel)
 
-            provider_short = rel.m3u_account.name[:20] if rel.m3u_account else "Unknown"
-            filename = integrator.build_filename(
-                rel.movie.name, rel.movie.year, provider_short,
-                rel.stream_id, rel.container_extension or "mkv"
-            )
+        result = []
+        for movie_data in movies_map.values():
+            movie = movie_data['movie']
+            relations = movie_data['relations']
 
-            size = 0
-            if rel.movie.duration_secs:
-                size = rel.movie.duration_secs * 250 * 1024
-            else:
-                size = 6000 * 250 * 1024
+            tmdb_id_val = movie.tmdb_id if hasattr(movie, 'tmdb_id') else None
+            folder_name = integrator.build_folder_name(movie.name, movie.year, tmdb_id_val)
 
-            file_node = FileNode(filename, stream_url, size, "video/x-matroska")
-            result.append(file_node)
+            movie_folder = DirectoryNode(folder_name)
+            movie_folder.metadata["movie_uuid"] = str(movie.uuid)
+
+            # Add file(s) to folder (one per stream)
+            for rel in relations:
+                stream_url = f"{base_url}/proxy/vod/movie/{movie.uuid}?stream_id={rel.stream_id}"
+                size = (movie.duration_secs or 6000) * 250 * 1024
+
+                filename = integrator.build_filename(
+                    movie.name, movie.year, "", rel.stream_id,
+                    rel.container_extension or "mkv", tmdb_id_val
+                )
+
+                file_node = FileNode(filename, stream_url, size, "video/x-matroska")
+                movie_folder.add_child(file_node)
+
+            result.append(movie_folder)
 
         return result
 
-    def _resolve_movie_by_filename(self, filename: str, category: Optional[str] = None) -> Optional[FileNode]:
-        """Resolve a movie file by filename via DB lookup on stream_id"""
-        try:
-            from apps.vod.models import M3UMovieRelation
-            from django.db.models import F
-        except ImportError:
-            return None
-
-        parts = filename.rsplit('-', 1)
-        if len(parts) < 2:
-            return None
-        stream_id = parts[-1].rsplit('.', 1)[0]
-
-        base_url = _get_dispatcharr_base_url()
-        integrator = DispatcharrIntegrator()
-        relations = M3UMovieRelation.objects.filter(
-            stream_id=stream_id,
-            category__m3u_relations__enabled=True,
-            category__m3u_relations__m3u_account=F("m3u_account"),
-        ).select_related('movie', 'm3u_account', 'category').distinct()
-        if category:
-            relations = relations.filter(category__name=category)
-
-        for rel in relations:
-            provider_short = rel.m3u_account.name[:20] if rel.m3u_account else "Unknown"
-            expected = integrator.build_filename(
-                rel.movie.name, rel.movie.year, provider_short,
-                rel.stream_id, rel.container_extension or "mkv"
-            )
-            if expected != filename:
-                continue
-
-            stream_url = f"{base_url}/proxy/vod/movie/{rel.movie.uuid}?stream_id={rel.stream_id}"
-            size = (rel.movie.duration_secs or 6000) * 250 * 1024
-            return FileNode(filename, stream_url, size, "video/x-matroska")
-
-        return None
-
     def _resolve_episode_by_filename(self, category: str, series_name: str, season_name: str, filename: str) -> Optional[FileNode]:
-        """Resolve an episode file by filename via DB lookup on stream_id."""
+        """Resolve an episode file by series name, season, and stream_id"""
         try:
-            from apps.vod.models import M3UEpisodeRelation
-            from django.db.models import F
+            from apps.vod.models import M3UEpisodeRelation, Series
+            from django.db.models import F, Q
         except ImportError:
             return None
 
-        series = self._find_series_by_display_name(series_name)
+        # Parse folder name to get series name and year: "Breaking Bad (2008) {tmdb-1396}"
+        import re
+        folder_match = re.match(r'^(.+?)\s*\((\d{4})\)(?:\s*\{tmdb-(\d+)\})?$', series_name)
+        if not folder_match:
+            return None
+
+        clean_series_name, year, tmdb_id = folder_match.groups()
+
+        # Find series by name and year
+        series_query = Q(name__contains=clean_series_name, year=int(year))
+        if tmdb_id:
+            series_query &= Q(tmdb_id=tmdb_id)
+
+        series = Series.objects.filter(series_query).first()
         if not series:
             return None
 
-        stream_part = filename.rsplit('-', 1)
-        if len(stream_part) < 2:
-            return None
-        stream_id = stream_part[-1].rsplit('.', 1)[0]
-
-        season_match = re.match(r'^S(\d{2})E(\d{2})\s+-', filename)
-        if not season_match:
+        # Parse filename: "Breaking Bad (2008) - S01E01 - 12345.mkv"
+        file_match = re.match(r'^.+\s*-\s*S(\d{2})E(\d{2})\s*-\s*(\d+)\.\w+$', filename)
+        if not file_match:
             return None
 
-        season_number = int(season_match.group(1))
-        episode_number = int(season_match.group(2))
+        season_number = int(file_match.group(1))
+        episode_number = int(file_match.group(2))
+        stream_id = file_match.group(3)
+
         if season_name != f"S{season_number:02d}":
             return None
 
@@ -410,9 +528,23 @@ class VirtualTree:
             relations = relations.filter(series_relation__category__name=category)
 
         base_url = _get_dispatcharr_base_url()
+
+        try:
+            from integration import DispatcharrIntegrator
+        except ImportError:
+            from .integration import DispatcharrIntegrator
+
+        integrator = DispatcharrIntegrator()
         for rel in relations:
-            expected = self._build_episode_filename(rel.episode, rel)
-            if expected != filename:
+            tmdb_id_val = series.tmdb_id if hasattr(series, 'tmdb_id') else None
+
+            filename_expected = integrator.build_episode_filename(
+                rel.episode.name, series.name, series.year,
+                season_number, episode_number, rel.container_extension or "mkv",
+                tmdb_id_val
+            )
+
+            if filename_expected != filename:
                 continue
 
             stream_url = f"{base_url}/proxy/vod/episode/{rel.episode.uuid}?stream_id={rel.stream_id}"
@@ -421,15 +553,17 @@ class VirtualTree:
 
         return None
 
-    def _build_episode_filename(self, episode: Any, relation: Any) -> str:
-        season_key = f"S{episode.season_number:02d}"
-        episode_key = f"{season_key}E{episode.episode_number:02d}"
-        provider = relation.m3u_account.name[:20] if relation.m3u_account else "Unknown"
-        ext = relation.container_extension or "mkv"
-        return f"{episode_key} - {episode.name} - {provider}-{relation.stream_id}.{ext}"
-
     def get_series_from_db(self, category: Optional[str] = None) -> List[DirectoryNode]:
-        """Get series from DB (live query, only enabled categories)"""
+        """Get series folders from DB (live query, only enabled categories)"""
+        try:
+            from integration import DispatcharrIntegrator
+        except ImportError:
+            from .integration import DispatcharrIntegrator
+
+        integrator = DispatcharrIntegrator()
+        if not integrator.is_available():
+            return []
+
         try:
             from apps.vod.models import M3USeriesRelation
             from django.db.models import F
@@ -452,11 +586,10 @@ class VirtualTree:
                 continue
             seen_series_ids.add(series.id)
 
-            series_name = series.name
-            if series.year and f"({series.year})" not in series.name:
-                series_name = f"{series.name} ({series.year})"
+            tmdb_id_val = series.tmdb_id if hasattr(series, 'tmdb_id') else None
+            folder_name = integrator.build_folder_name(series.name, series.year, tmdb_id_val)
 
-            dir_node = DirectoryNode(series_name)
+            dir_node = DirectoryNode(folder_name)
             dir_node.metadata["series_uuid"] = str(series.uuid)
             result.append(dir_node)
 
@@ -470,8 +603,20 @@ class VirtualTree:
         return None
 
     def get_seasons_from_db(self, series_uuid: str) -> List[DirectoryNode]:
-        """Get seasons/episodes from DB (live query)"""
+        """Get seasons/episodes from DB with clean naming"""
         logger.debug("get_seasons_from_db called for UUID: %s", series_uuid)
+
+        try:
+            from apps.vod.models import Series
+        except ImportError:
+            return []
+
+        try:
+            series = Series.objects.get(uuid=series_uuid)
+        except Series.DoesNotExist:
+            logger.warning("Series %s not found", series_uuid)
+            return []
+
         try:
             from integration import DispatcharrIntegrator
         except ImportError:
@@ -487,6 +632,8 @@ class VirtualTree:
         base_url = _get_dispatcharr_base_url()
 
         seasons = {}
+        tmdb_id_val = series.tmdb_id if hasattr(series, 'tmdb_id') else None
+
         for episode in episodes:
             season_key = f"S{episode['season_number']:02d}"
             if season_key not in seasons:
@@ -495,10 +642,15 @@ class VirtualTree:
             for stream in episode.get('streams', []):
                 stream_url = stream['stream_url']
                 ext = stream['extension'] or "mkv"
-                provider = stream['account_name'][:20] if stream['account_name'] else "Unknown"
                 size = stream.get('size', 0)
+                stream_id = stream['stream_id']
 
-                filename = f"{season_key}E{episode['episode_number']:02d} - {episode['name']} - {provider}-{stream['stream_id']}.{ext}"
+                filename = integrator.build_episode_filename(
+                    episode['name'], series.name, series.year,
+                    episode['season_number'], episode['episode_number'],
+                    ext, tmdb_id_val
+                ) + f" - {stream_id}"
+
                 file_node = FileNode(filename, stream_url, size, "video/x-matroska")
                 seasons[season_key].add_child(file_node)
 
