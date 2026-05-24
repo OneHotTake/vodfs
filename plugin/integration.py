@@ -130,11 +130,12 @@ class DispatcharrIntegrator:
 
         return clean_name
 
-    def build_filename(self, title: str, year: int, provider_short: str, stream_id: str, ext: str, tmdb_id: str | None = None) -> str:
-        """Build filename with clean title and optional TMDB ID for Plex matching.
+    def build_filename(self, title: str, year: int, provider_short: str, stream_id: str, ext: str, tmdb_id: str | None = None, imdb_id: str | None = None) -> str:
+        """Build filename with clean title, external IDs, provider, and stream_id.
 
-        Format: {CleanTitle} ({Year}) {tmdb-XXX} - {StreamID}.{ext}
-        Note: Stream ID is kept for playback resolution, but stripped from provider prefix.
+        Format: {CleanTitle} ({Year}) {imdb-XXX} {tmdb-XXX} - {ProviderShort} - {StreamID}.{ext}
+        Note: Provider and Stream ID kept for playback resolution and human readability.
+        Priority: IMDB preferred for series, TMDB preferred for movies, but both shown if available.
         """
         # Clean the title (strip quality prefix and year)
         clean_title = self.clean_movie_name(title)
@@ -142,34 +143,64 @@ class DispatcharrIntegrator:
         # Build base filename
         filename = f"{clean_title} ({year})"
 
-        # Add TMDB ID if available (Plex uses this for matching)
+        # Add external IDs (both IMDB and TMDB if available)
+        # IMDB format: imdb-tt1234567
+        # TMDB format: tmdb-123
+        ids = []
+        if imdb_id:
+            # IMDB IDs usually have 'tt' prefix, ensure it's present
+            imdb_val = imdb_id if imdb_id.startswith('tt') else f'tt{imdb_id}'
+            ids.append(f'imdb-{imdb_val}')
         if tmdb_id:
-            filename += f" {{tmdb-{tmdb_id}}}"
+            ids.append(f'tmdb-{tmdb_id}')
 
-        # Add stream ID only (for playback resolution, no provider prefix)
-        filename += f" - {stream_id}.{ext}"
+        if ids:
+            filename += f" {{{' '.join(ids)}}}"
+
+        # Add provider and stream ID (for playback resolution and human readability)
+        filename += f" - {provider_short} - {stream_id}.{ext}"
 
         return filename
 
-    def build_folder_name(self, title: str, year: int, tmdb_id: str | None = None) -> str:
-        """Build folder name for movie or series with TMDB ID."""
+    def build_folder_name(self, title: str, year: int, tmdb_id: str | None = None, imdb_id: str | None = None) -> str:
+        """Build folder name for movie or series with external IDs."""
         clean_title = self.clean_movie_name(title)
         folder_name = f"{clean_title} ({year})"
+
+        # Add external IDs (both IMDB and TMDB if available)
+        ids = []
+        if imdb_id:
+            imdb_val = imdb_id if imdb_id.startswith('tt') else f'tt{imdb_id}'
+            ids.append(f'imdb-{imdb_val}')
         if tmdb_id:
-            folder_name += f" {{tmdb-{tmdb_id}}}"
+            ids.append(f'tmdb-{tmdb_id}')
+
+        if ids:
+            folder_name += f" {{{' '.join(ids)}}}"
+
         return folder_name
 
     def build_episode_filename(self, episode_name: str, series_name: str, year: int,
                                 season_number: int, episode_number: int, ext: str,
-                                tmdb_id: str | None = None) -> str:
-        """Build episode filename with clean series name and TMDB ID."""
+                                tmdb_id: str | None = None, imdb_id: str | None = None) -> str:
+        """Build episode filename with clean series name and external IDs."""
         clean_series = self.clean_movie_name(series_name)
         season_key = f"S{season_number:02d}"
         episode_key = f"{season_key}E{episode_number:02d}"
 
         filename = f"{clean_series} ({year}) - {episode_key}"
+
+        # Add external IDs (both IMDB and TMDB if available)
+        ids = []
+        if imdb_id:
+            imdb_val = imdb_id if imdb_id.startswith('tt') else f'tt{imdb_id}'
+            ids.append(f'imdb-{imdb_val}')
         if tmdb_id:
-            filename += f" {{tmdb-{tmdb_id}}}"
+            ids.append(f'tmdb-{tmdb_id}')
+
+        if ids:
+            filename += f" {{{' '.join(ids)}}}"
+
         filename += f".{ext}"
 
         return filename

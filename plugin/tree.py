@@ -171,14 +171,14 @@ class VirtualTree:
             if existing:
                 return existing
 
-            # Parse folder name: "Title (Year) {tmdb-XXX}"
-            # Extract title, year, tmdb_id
+            # Parse folder name: "Title (Year) {imdb-ttXXX} {tmdb-YYY}"
+            # Extract title, year, imdb_id, tmdb_id
             import re
-            folder_match = re.match(r'^(.+?)\s*\((\d{4})\)(?:\s*\{tmdb-(\d+)\})?$', movie_folder_name)
+            folder_match = re.match(r'^(.+?)\s*\((\d{4})\)(?:\s*\{(?:imdb-tt\d+|tmdb-\d+)(?:\s+(?:imdb-tt\d+|tmdb-\d+))*\})?$', movie_folder_name)
             if folder_match:
-                title, year, tmdb_id = folder_match.groups()
+                title, year = folder_match.groups()[:2]
                 category = None if components[0] == "All" else components[0]
-                movie_folder = self._resolve_movie_folder(title, int(year), tmdb_id, category)
+                movie_folder = self._resolve_movie_folder(title, int(year), None, category)
                 if movie_folder:
                     parent.add_child(movie_folder)
                     return movie_folder
@@ -196,16 +196,35 @@ class VirtualTree:
             if existing:
                 return existing
 
-            # Parse filename to get stream_id: "Title (Year) {tmdb-XXX} - 12345.mkv"
+            # Parse filename to get stream_id and provider: "Title (Year) {ids} - Provider - 12345.mkv"
             import re
-            file_match = re.match(r'^(.+?)\s*\((\d{4})\)(?:\s*\{tmdb-\d+\})?\s*-\s*(\d+)\.\w+$', filename)
-            if file_match:
-                title, year, stream_id = file_match.groups()
-                category = None if components[0] == "All" else components[0]
-                file_node = self._resolve_movie_by_filename(title, int(year), stream_id, category)
-                if file_node:
-                    parent.add_child(file_node)
-                    return file_node
+            # Split on ' - ' from the right to get provider and stream_id
+            parts = filename.rsplit(' - ', 2)
+            if len(parts) < 3:
+                return None
+
+            provider = parts[1]
+            stream_part = parts[2]
+            stream_match = re.match(r'^(\d+)\.\w+$', stream_part)
+            if not stream_match:
+                return None
+
+            stream_id = stream_match.group(1)
+
+            # Extract title and year from filename (before provider/stream)
+            file_prefix = parts[0]
+            prefix_match = re.match(r'^(.+?)\s*\((\d{4})\)', file_prefix)
+            if not prefix_match:
+                return None
+
+            title = prefix_match.group(1)
+            year = int(prefix_match.group(2))
+
+            category = None if components[0] == "All" else components[0]
+            file_node = self._resolve_movie_by_filename(title, year, stream_id, category)
+            if file_node:
+                parent.add_child(file_node)
+                return file_node
 
             return None
 
@@ -244,9 +263,10 @@ class VirtualTree:
         integrator = DispatcharrIntegrator()
         movie = relations[0].movie
         tmdb_id_val = movie.tmdb_id if hasattr(movie, 'tmdb_id') else None
+        imdb_id_val = movie.imdb_id if hasattr(movie, 'imdb_id') else None
 
         # Build folder name
-        folder_name = integrator.build_folder_name(movie.name, movie.year, tmdb_id_val)
+        folder_name = integrator.build_folder_name(movie.name, movie.year, tmdb_id_val, imdb_id_val)
         movie_folder = DirectoryNode(folder_name)
         movie_folder.metadata["movie_uuid"] = str(movie.uuid)
 
@@ -255,9 +275,10 @@ class VirtualTree:
             stream_url = f"{base_url}/proxy/vod/movie/{movie.uuid}?stream_id={rel.stream_id}"
             size = (movie.duration_secs or 6000) * 250 * 1024
 
+            provider_short = rel.m3u_account.name[:20] if rel.m3u_account else "Unknown"
             filename = integrator.build_filename(
-                movie.name, movie.year, "", rel.stream_id,
-                rel.container_extension or "mkv", tmdb_id_val
+                movie.name, movie.year, provider_short, rel.stream_id,
+                rel.container_extension or "mkv", tmdb_id_val, imdb_id_val
             )
 
             file_node = FileNode(filename, stream_url, size, "video/x-matroska")
@@ -535,14 +556,16 @@ class VirtualTree:
             from .integration import DispatcharrIntegrator
 
         integrator = DispatcharrIntegrator()
+
         for rel in relations:
             tmdb_id_val = series.tmdb_id if hasattr(series, 'tmdb_id') else None
+            imdb_id_val = series.imdb_id if hasattr(series, 'imdb_id') else None
 
             filename_expected = integrator.build_episode_filename(
                 rel.episode.name, series.name, series.year,
                 season_number, episode_number, rel.container_extension or "mkv",
-                tmdb_id_val
-            )
+                tmdb_id_val, imdb_id_val
+            ) + f" - {rel.m3u_account.name[:20] if rel.m3u_account else 'Unknown'} - {rel.stream_id}"
 
             if filename_expected != filename:
                 continue
@@ -587,7 +610,8 @@ class VirtualTree:
             seen_series_ids.add(series.id)
 
             tmdb_id_val = series.tmdb_id if hasattr(series, 'tmdb_id') else None
-            folder_name = integrator.build_folder_name(series.name, series.year, tmdb_id_val)
+            imdb_id_val = series.imdb_id if hasattr(series, 'imdb_id') else None
+            folder_name = integrator.build_folder_name(series.name, series.year, tmdb_id_val, imdb_id_val)
 
             dir_node = DirectoryNode(folder_name)
             dir_node.metadata["series_uuid"] = str(series.uuid)
@@ -633,6 +657,7 @@ class VirtualTree:
 
         seasons = {}
         tmdb_id_val = series.tmdb_id if hasattr(series, 'tmdb_id') else None
+        imdb_id_val = series.imdb_id if hasattr(series, 'imdb_id') else None
 
         for episode in episodes:
             season_key = f"S{episode['season_number']:02d}"
@@ -644,12 +669,13 @@ class VirtualTree:
                 ext = stream['extension'] or "mkv"
                 size = stream.get('size', 0)
                 stream_id = stream['stream_id']
+                provider = stream['account_name'][:20] if stream['account_name'] else "Unknown"
 
                 filename = integrator.build_episode_filename(
                     episode['name'], series.name, series.year,
                     episode['season_number'], episode['episode_number'],
-                    ext, tmdb_id_val
-                ) + f" - {stream_id}"
+                    ext, tmdb_id_val, imdb_id_val
+                ) + f" - {provider} - {stream_id}"
 
                 file_node = FileNode(filename, stream_url, size, "video/x-matroska")
                 seasons[season_key].add_child(file_node)
