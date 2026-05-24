@@ -205,16 +205,39 @@ class Plugin:
         enable_auth = settings.get("enable_auth", False)
 
         if enable_auth:
-            config = f"""[vodfs]
+            config = f"""# VODFS rclone remote
+# Paste this block into your rclone.conf file.
+# Suggested mount point: /mnt/vodfs
+# Mount command:
+#   mkdir -p /mnt/vodfs
+#   rclone mount vodfs: /mnt/vodfs --allow-other --vfs-cache-mode off --dir-cache-time 5s --poll-interval 0
+# Plex library paths:
+#   Movies: /mnt/vodfs/Movies/All
+#   Series: /mnt/vodfs/Series/All
+# Secured installs: replace <your-dispatcharr-api-key> with an active Dispatcharr API key.
+
+[vodfs]
 type = http
 url = http://127.0.0.1:{port}/
 headers = Authorization, ApiKey <your-dispatcharr-api-key>
 """
             message = "Add this to your rclone config file. Use any active Dispatcharr API key for authentication."
         else:
-            config = f"""[vodfs]
+            config = f"""# VODFS rclone remote
+# Paste this block into your rclone.conf file.
+# Suggested mount point: /mnt/vodfs
+# Mount command:
+#   mkdir -p /mnt/vodfs
+#   rclone mount vodfs: /mnt/vodfs --allow-other --vfs-cache-mode off --dir-cache-time 5s --poll-interval 0
+# Plex library paths:
+#   Movies: /mnt/vodfs/Movies/All
+#   Series: /mnt/vodfs/Series/All
+# Secured installs: enable plugin auth, then uncomment the headers line and replace the placeholder.
+
+[vodfs]
 type = http
 url = http://127.0.0.1:{port}/
+# headers = Authorization, ApiKey <your-dispatcharr-api-key>
 """
             message = "Add this to your rclone config file"
 
