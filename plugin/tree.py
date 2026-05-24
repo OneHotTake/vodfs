@@ -196,24 +196,24 @@ class VirtualTree:
             if existing:
                 return existing
 
-            # Parse filename to get stream_id and provider: "Title (Year) {ids} - Provider - 12345.mkv"
+            # Parse filename: "Title (Year) - Provider - StreamID - Quality {ids}.ext"
             import re
-            # Split on ' - ' from the right to get provider and stream_id
-            parts = filename.rsplit(' - ', 2)
+            # Split on ' - ' from the right: [Title (Year), Provider, StreamID, Quality {ids}.ext]
+            parts = filename.rsplit(' - ', 3)
             if len(parts) < 3:
                 return None
 
             provider = parts[1]
             stream_part = parts[2]
-            stream_match = re.match(r'^(\d+)\.\w+$', stream_part)
+            stream_match = re.match(r'^(\d+)(?:\s*-\s*\S+)?\.\w+$', stream_part)
             if not stream_match:
                 return None
 
             stream_id = stream_match.group(1)
 
-            # Extract title and year from filename (before provider/stream)
-            file_prefix = parts[0]
-            prefix_match = re.match(r'^(.+?)\s*\((\d{4})\)', file_prefix)
+            # Extract title and year from first part
+            title_part = parts[0]
+            prefix_match = re.match(r'^(.+?)\s*\((\d{4})\)', title_part)
             if not prefix_match:
                 return None
 
@@ -560,14 +560,22 @@ class VirtualTree:
         for rel in relations:
             tmdb_id_val = series.tmdb_id if hasattr(series, 'tmdb_id') else None
             imdb_id_val = series.imdb_id if hasattr(series, 'imdb_id') else None
+            provider = rel.m3u_account.name[:20] if rel.m3u_account else "Unknown"
 
-            filename_expected = integrator.build_episode_filename(
-                rel.episode.name, series.name, series.year,
-                season_number, episode_number, rel.container_extension or "mkv",
-                tmdb_id_val, imdb_id_val
-            ) + f" - {rel.m3u_account.name[:20] if rel.m3u_account else 'Unknown'} - {rel.stream_id}"
+            # Parse filename to extract season/episode
+            import re
+            se_match = re.match(r'^.+\s*-\s*S(\d{2})E(\d{2})\s+-\s*(\d+)', filename)
+            if not se_match:
+                continue
 
-            if filename_expected != filename:
+            season_num = int(se_match.group(1))
+            episode_num = int(se_match.group(2))
+            stream_id = se_match.group(3)
+
+            if season_num != season_number or episode_num != episode_number:
+                continue
+
+            if stream_id != rel.stream_id:
                 continue
 
             stream_url = f"{base_url}/proxy/vod/episode/{rel.episode.uuid}?stream_id={rel.stream_id}"
@@ -671,11 +679,30 @@ class VirtualTree:
                 stream_id = stream['stream_id']
                 provider = stream['account_name'][:20] if stream['account_name'] else "Unknown"
 
+                # Extract quality from series name if available
+                _, quality = integrator.clean_movie_name(series.name)
+
                 filename = integrator.build_episode_filename(
                     episode['name'], series.name, series.year,
                     episode['season_number'], episode['episode_number'],
                     ext, tmdb_id_val, imdb_id_val
-                ) + f" - {provider} - {stream_id}"
+                )
+
+                # Reformat: Title (Year) - S01E01 - Provider - StreamID - Quality {ids}
+                clean_series = integrator.clean_movie_name(series.name)[0]
+                season_key_ep = f"S{episode['season_number']:02d}"
+                episode_key = f"{season_key_ep}E{episode['episode_number']:02d}"
+
+                ids = []
+                if imdb_id_val:
+                    ids.append(f'imdb-{imdb_id_val}')
+                if tmdb_id_val:
+                    ids.append(f'tmdb-{tmdb_id_val}')
+
+                id_str = f" {{{' '.join(ids)}}}" if ids else ""
+                quality_str = f" - {quality}" if quality else ""
+
+                filename = f"{clean_series} ({series.year}) - {episode_key} - {provider} - {stream_id}{quality_str}{id_str}.{ext}"
 
                 file_node = FileNode(filename, stream_url, size, "video/x-matroska")
                 seasons[season_key].add_child(file_node)

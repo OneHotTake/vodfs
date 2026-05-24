@@ -105,22 +105,28 @@ class DispatcharrIntegrator:
         else:
             raise ValueError(f"Unknown content type: {content_type}")
 
-    def clean_movie_name(self, name: str) -> str:
+    def clean_movie_name(self, name: str) -> tuple[str, str]:
         """
         Strip quality/language prefix from IPTV provider name.
-        Returns clean title only (no year, no quality prefix).
+        Returns (clean_title, quality_prefix)
 
         Examples:
-            "4K-EN - Deadpool (2016)" → "Deadpool"
-            "4K-D+ | Dawn of the Planet of the Apes (2014)" → "Dawn of the Planet of the Apes"
-            "HD FR - Matrix (1999)" → "Matrix"
-            "3D IT - Avatar (2009)" → "Avatar"
+            "4K-EN - Deadpool (2016)" → ("Deadpool", "4K-EN")
+            "4K-D+ | Dawn of the Planet of the Apes (2014)" → ("Dawn of the Planet of the Apes", "4K-D+")
+            "HD FR - Matrix (1999)" → ("Matrix", "HD FR")
+            "3D IT - Avatar (2009)" → ("Avatar", "3D IT")
+            "Deadpool (2016)" → ("Deadpool", "")
         """
         # Split on ' - ' or ' | ' to remove quality prefix
+        quality_prefix = ""
         if ' - ' in name:
-            title_part = name.split(' - ', 1)[1]
+            parts = name.split(' - ', 1)
+            quality_prefix = parts[0].strip()
+            title_part = parts[1]
         elif ' | ' in name:
-            title_part = name.split(' | ', 1)[1]
+            parts = name.split(' | ', 1)
+            quality_prefix = parts[0].strip()
+            title_part = parts[1]
         else:
             title_part = name
 
@@ -128,27 +134,27 @@ class DispatcharrIntegrator:
         import re
         clean_name = re.sub(r'\s*\(\d{4}\)\s*$', '', title_part).strip()
 
-        return clean_name
+        return clean_name, quality_prefix
 
     def build_filename(self, title: str, year: int, provider_short: str, stream_id: str, ext: str, tmdb_id: str | None = None, imdb_id: str | None = None) -> str:
-        """Build filename with clean title, external IDs, provider, and stream_id.
+        """Build filename with clean title, provider, stream, quality, and external IDs.
 
-        Format: {CleanTitle} ({Year}) {imdb-XXX} {tmdb-XXX} - {ProviderShort} - {StreamID}.{ext}
-        Note: Provider and Stream ID kept for playback resolution and human readability.
-        Priority: IMDB preferred for series, TMDB preferred for movies, but both shown if available.
+        Format: {CleanTitle} ({Year}) - {Provider} - {StreamID} - {Quality} {imdb-XXX} {tmdb-XXX}.{ext}
+        Plex strips {ids} portion for matching, but provider/stream/quality remain visible.
         """
-        # Clean the title (strip quality prefix and year)
-        clean_title = self.clean_movie_name(title)
+        # Clean the title (strip quality prefix and year) and extract quality
+        clean_title, quality = self.clean_movie_name(title)
 
         # Build base filename
-        filename = f"{clean_title} ({year})"
+        filename = f"{clean_title} ({year}) - {provider_short} - {stream_id}"
+
+        # Add quality if present
+        if quality:
+            filename += f" - {quality}"
 
         # Add external IDs (both IMDB and TMDB if available)
-        # IMDB format: imdb-tt1234567
-        # TMDB format: tmdb-123
         ids = []
         if imdb_id:
-            # IMDB IDs usually have 'tt' prefix, ensure it's present
             imdb_val = imdb_id if imdb_id.startswith('tt') else f'tt{imdb_id}'
             ids.append(f'imdb-{imdb_val}')
         if tmdb_id:
@@ -157,14 +163,13 @@ class DispatcharrIntegrator:
         if ids:
             filename += f" {{{' '.join(ids)}}}"
 
-        # Add provider and stream ID (for playback resolution and human readability)
-        filename += f" - {provider_short} - {stream_id}.{ext}"
+        filename += f".{ext}"
 
         return filename
 
     def build_folder_name(self, title: str, year: int, tmdb_id: str | None = None, imdb_id: str | None = None) -> str:
         """Build folder name for movie or series with external IDs."""
-        clean_title = self.clean_movie_name(title)
+        clean_title, _ = self.clean_movie_name(title)
         folder_name = f"{clean_title} ({year})"
 
         # Add external IDs (both IMDB and TMDB if available)
@@ -184,7 +189,7 @@ class DispatcharrIntegrator:
                                 season_number: int, episode_number: int, ext: str,
                                 tmdb_id: str | None = None, imdb_id: str | None = None) -> str:
         """Build episode filename with clean series name and external IDs."""
-        clean_series = self.clean_movie_name(series_name)
+        clean_series, _ = self.clean_movie_name(series_name)
         season_key = f"S{season_number:02d}"
         episode_key = f"{season_key}E{episode_number:02d}"
 
