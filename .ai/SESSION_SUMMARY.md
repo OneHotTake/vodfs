@@ -40,3 +40,11 @@
 ### Verification
 - Checked README for stale manifest/hydration references.
 - Architecture doc only mentions legacy manifest/hydration as intentionally removed.
+
+## Session: Hidden Fortune Endpoint
+
+### Changes Made
+1. **plugin/server.py**: Added hidden `GET /fortune` endpoint returning a random VODFS fortune as plain text.
+
+### Verification
+- Deployed to the running container and verified `/fortune` returns a text fortune.

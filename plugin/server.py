@@ -2,6 +2,7 @@
 
 import logging
 import os
+import random
 import uvicorn
 from contextlib import asynccontextmanager
 from typing import List
@@ -23,6 +24,14 @@ _ENABLE_AUTH = os.environ.get("VODFS_ENABLE_AUTH", "false").lower() == "true"
 
 _server_ready = False
 _startup_errors: List[str] = []
+
+_FORTUNES = [
+    "302 Found: Your movie has been redirected to happiness.",
+    "VODFS: because your IPTV provider gave you chaos, and Plex demanded folders.",
+    "The best filesystem is the one that never stores your files.",
+    "A watched directory never buffers. Probably.",
+    "Your stream is in another proxy.",
+]
 
 
 def check_network_access(request: Request):
@@ -171,6 +180,17 @@ def create_app(tree: VirtualTree) -> FastAPI:
         """Return copy/paste-ready rclone configuration."""
         return Response(
             content=_build_rclone_config(str(request.base_url)),
+            media_type="text/plain; charset=utf-8",
+        )
+
+    @app.get("/fortune")
+    async def fortune(
+        _network=Depends(check_network_access),
+        _auth=Depends(check_api_key_auth),
+    ):
+        """Return a tiny VODFS fortune."""
+        return Response(
+            content=random.choice(_FORTUNES) + "\n",
             media_type="text/plain; charset=utf-8",
         )
 
