@@ -1,228 +1,73 @@
-# HTTP Filesystem Design
+# HTTP Filesystem Behavior
 
-## Protocol Choice
+VODFS speaks the same minimal protocol that rclone's `http` backend already understands: HTML directory indexes, `HEAD` for metadata, and `GET` that either returns an index or a redirect. There is no WebDAV here, and no need for it — a `<a href="...">` per entry is the whole interface contract.
 
-The plugin implements a **simple HTTP directory listing protocol** compatible with rclone's `http` backend.
+## Requests
 
-**Why not WebDAV?**
-- WebDAV is complex and overkill for read-only browsing
-- rclone's `http` backend is simpler and sufficient
-- Fewer dependencies and edge cases
-- Better performance for large libraries
+A directory request looks like:
 
-## Request Flow
-
-### GET Request
-
-```
+```http
 GET /Movies/All/ HTTP/1.1
 Host: 127.0.0.1:8888
 User-Agent: rclone/v1.65.0
 ```
 
-**Response**:
-```http
-HTTP/1.1 200 OK
-Content-Type: text/html; charset=utf-8
-
-<!DOCTYPE html>
-<html>
-...
-</html>
-```
-
-### HEAD Request
-
-```
-HEAD /Movies/All/Inception (2010).mkv HTTP/1.1
-Host: 127.0.0.1:8888
-User-Agent: rclone/v1.65.0
-```
-
-**Response**:
-```http
-HTTP/1.1 200 OK
-Content-Type: video/x-matroska
-Content-Length: 1234567890
-Accept-Ranges: bytes
-Last-Modified: Mon, 20 May 2026 12:00:00 GMT
-```
-
-### GET File Request
-
-```
-GET /Movies/All/Inception (2010).mkv HTTP/1.1
-Host: 127.0.0.1:8888
-User-Agent: Plex/1.32.0
-```
-
-**Response**:
-```http
-HTTP/1.1 302 Found
-Location: /proxy/vod/movie/abc123-def456-ghi789?stream_id=12345
-```
-
-## Directory Listing Format
-
-The plugin generates HTML directory listings that rclone can parse.
-
-**Template**:
-```html
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Index of /Movies/All/</title>
-    <style>
-        body { font-family: monospace; padding: 20px; }
-        table { border-collapse: collapse; width: 100%; }
-        th { text-align: left; padding: 5px; border-bottom: 1px solid #ccc; }
-        td { padding: 5px; }
-        a { text-decoration: none; color: #0066cc; }
-        a:hover { text-decoration: underline; }
-    </style>
-</head>
-<body>
-    <h1>Index of /Movies/All/</h1>
-    <table>
-        <thead>
-            <tr>
-                <th>Name</th>
-                <th>Size</th>
-            </tr>
-        </thead>
-        <tbody>
-            <tr>
-                <td><a href="../">../</a></td>
-                <td></td>
-            </tr>
-            <tr>
-                <td><a href="Inception%20%282010%29.mkv">Inception (2010).mkv</a></td>
-                <td>1234567890</td>
-            </tr>
-            <tr>
-                <td><a href="The%20Matrix%20%281999%29.mkv">The Matrix (1999).mkv</a></td>
-                <td>987654321</td>
-            </tr>
-        </tbody>
-    </table>
-</body>
-</html>
-```
-
-**Key Points**:
-- Parent directory link (`../`) at top
-- Directories sorted first (by name)
-- Files sorted next (by name)
-- URLs are URL-encoded
-- File size shown in bytes
-
-## Headers
-
-### Directory Response (GET/HEAD)
-
-```http
-HTTP/1.1 200 OK
-Content-Type: text/html; charset=utf-8
-```
-
-### File Response (HEAD)
-
-```http
-HTTP/1.1 200 OK
-Content-Type: video/x-matroska
-Content-Length: 1234567890
-Accept-Ranges: bytes
-Last-Modified: Mon, 20 May 2026 12:00:00 GMT
-```
-
-### File Response (GET)
+and returns a small HTML page with one `<a>` per entry. `HEAD` on a file returns content-type and length headers without a body. `GET` on a file returns:
 
 ```http
 HTTP/1.1 302 Found
-Location: /proxy/vod/movie/abc123?stream_id=12345
+Location: http://dispatcharr/proxy/vod/movie/<uuid>?stream_id=<id>
 ```
+
+The plugin never streams media bytes itself.
 
 ## Path Resolution
 
-Path resolution uses lazy DB queries with manifest caching:
+There is no manifest or snapshot. Every path is resolved against Dispatcharr's database when the request comes in:
 
-1. Split path by `/`
-2. Use manifest for category/series skeleton lookups
-3. Query DB only when needed (movies, episodes)
-4. Return node or None (404)
+| Path | Handler |
+|------|---------|
+| `/` | Root index (`Movies`, `Series`) |
+| `/Movies/` | Enabled movie categories plus `All` |
+| `/Movies/All/` or `/Movies/<Category>/` | `_get_movies_listing` |
+| `/Series/All/` or `/Series/<Category>/` | `_get_series_listing` |
+| `/Series/<Category>/<Show>/` | `_get_seasons_listing` |
+| `/Series/<Category>/<Show>/S01/` | `_get_episodes_listing` |
+| Anything else | `404` |
 
-**Examples**:
-- `/` → Root node (Movies, Series)
-- `/Movies/` → Movies directory (categories from manifest)
-- `/Movies/All/` → All movies directory (lazy DB query)
-- `/Movies/Action/` → Action category directory (lazy DB query)
-- `/Movies/All/Inception (2010).mkv` → File node (placeholder for HEAD)
-- `/Series/All/Show Name/` → Series directory (manifest lookup)
-- `/Series/All/Show Name/S01/` → Season directory (lazy episode query)
-- `/Invalid/Path/` → None (404)
+Movie files are formatted as:
 
-### Series Path Routing
-
-| Path Components | Handler | Description |
-|-----------------|---------|-------------|
-| `/Series/All/` | `_get_series_listing` | Lists all series from manifest |
-| `/Series/{Category}/` | `_get_series_listing` | Lists series in category |
-| `/Series/{Category}/{Show}/` | `_get_seasons_listing` | Lists season directories |
-| `/Series/{Category}/{Show}/S01/` | `_get_episodes_listing` | Lists episode files |
-
-## Trailing Slash Handling
-
-Directories without trailing slash return 301 redirect:
-
-```
-GET /Movies/All HTTP/1.1
-→
-HTTP/1.1 301 Moved Permanently
-Location: /Movies/All/
+```text
+{Title} ({Year}) - {ProviderShortName}-{StreamID}.{ext}
 ```
 
-This ensures consistent behavior and proper relative link resolution.
+Episode files as:
 
-## Error Handling
-
-| Status | Description |
-|--------|-------------|
-| 200 | Success (directory listing, HEAD on file) |
-| 301 | Trailing slash redirect |
-| 302 | Redirect to stream URL |
-| 404 | Not found (invalid path) |
-| 405 | Method not allowed |
-| 500 | Internal error (no stream URL, etc.) |
-
-## Content-Type Mapping
-
-| Extension | Content-Type |
-|-----------|--------------|
-| .mkv | video/x-matroska |
-| .mp4 | video/mp4 |
-| .avi | video/x-msvideo |
-| .mov | video/quicktime |
-| .wmv | video/x-ms-wmv |
-| .flv | video/x-flv |
-| .webm | video/webm |
-| directory | text/html |
-
-## Range Support (Future)
-
-For seekable playback, the plugin may support Range headers:
-
-```
-GET /Movies/All/Video.mkv HTTP/1.1
-Host: 127.0.0.1:8888
-Range: bytes=0-1023
+```text
+S01E01 - {Episode Name} - {ProviderShortName}-{StreamID}.{ext}
 ```
 
-**Response**:
-```http
-HTTP/1.1 206 Partial Content
-Content-Range: bytes 0-1023/1234567890
-Content-Length: 1024
-Accept-Ranges: bytes
-```
+The stream ID is baked into the filename so a direct file `GET` can be resolved deterministically after a restart, without needing the parent directory to have been listed first.
 
-**Note**: Currently, all requests redirect to Dispatcharr proxy, which handles Range headers. The plugin itself doesn't stream data.
+## Directory Index
+
+The HTML is intentionally bland: a table with `Name` and `Size` columns, a `../` link at the top, directories before files, names URL-encoded. rclone's HTTP parser is tolerant but conservative; this format has been the path of least surprise.
+
+## Status Codes
+
+| Status | When |
+|--------|------|
+| `200` | Directory listing or `HEAD` on a known file |
+| `301` | Directory request without trailing slash, redirected to the slashed form |
+| `302` | `GET` on a file, redirecting to Dispatcharr's VOD proxy |
+| `404` | Unknown path |
+| `405` | Method other than `GET` or `HEAD` |
+| `500` | Stream URL could not be constructed |
+
+## Content Types
+
+The plugin maps the common video extensions (`.mkv`, `.mp4`, `.avi`, `.mov`, `.wmv`, `.flv`, `.webm`) to their usual MIME types and serves directories as `text/html; charset=utf-8`. Range headers are not handled here — the redirect target (Dispatcharr's proxy) handles them.
+
+## Caching
+
+A small in-memory TTL/LRU cache (`plugin/cache.py`) sits in front of directory rendering so repeated `ls` from rclone doesn't re-query the database every time. It is a performance cache only and expires within minutes; the source of truth is always Dispatcharr.

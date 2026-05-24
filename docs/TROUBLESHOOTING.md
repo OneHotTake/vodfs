@@ -1,87 +1,75 @@
-# Troubleshooting Guide
+# Troubleshooting
 
-## Common Issues
+The README covers the common end-user problems. This file is for the longer tail — symptoms that need a bit more poking around.
 
-### Server Won't Start
+## Server Won't Start
 
-**Symptom**: Plugin enable fails or server doesn't bind to port.
+The plugin enable action returns an error or the port never opens. Things to check, in order:
 
-**Solutions**:
-1. Check if port is already in use: `lsof -i :8888`
-2. Change HTTP Port in plugin settings
-3. Check plugin logs for errors
-4. Verify PID file location: `/data/plugins/vodfs/server.pid`
+1. **Port already bound.** `lsof -i :8888` (or whatever port you configured). Pick a different one in plugin settings if so.
+2. **Stale PID file.** `/data/plugins/vodfs/server.pid` may point at a process that no longer exists, in which case `plugin.py` will refuse to start a new one. Remove the file and re-enable.
+3. **Permissions.** `/data/plugins/vodfs/` needs to be writable by whatever user Dispatcharr runs as.
+4. **Child crashed on startup.** `tail` the server log at `/data/plugins/vodfs/server.log`. The most common failure here is a Django import error caused by running against an incompatible Dispatcharr version.
 
-### rclone Mount Fails
+## rclone Connection Refused
 
-**Symptom**: `rclone mount` returns connection refused.
+The server is up (you can `curl` it from the Dispatcharr host) but rclone on a different host can't connect. Two cases:
 
-**Solutions**:
-1. Verify server is running: `curl http://127.0.0.1:8888/Movies/`
-2. Check rclone config URL matches server port
-3. Ensure server binds to 127.0.0.1 (not 0.0.0.0)
-4. Restart plugin and retry mount
+- **Docker.** The plugin server binds inside the Dispatcharr container. Your rclone config needs to use the container's published port on the host or the container IP, not `127.0.0.1`.
+- **Firewall.** If you put a firewall between Dispatcharr and Plex, open the configured port.
 
-### Plex Can't Scan Library
+## Empty Directories
 
-**Symptom**: Plex shows empty library after scan.
+`/Movies/All/` and `/Series/All/` return nothing. Verify directly against the plugin:
 
-**Solutions**:
-1. Verify rclone mount is accessible: `ls /path/to/mount/Movies/All/`
-2. Check directory listing returns files: `curl http://127.0.0.1:8888/Movies/All/`
-3. Ensure files have `.mkv` extension
-4. Verify stream URLs are valid
+```bash
+curl http://127.0.0.1:8888/Movies/
+curl http://127.0.0.1:8888/Movies/All/
+curl http://127.0.0.1:8888/Series/All/
+```
 
-### Playback Fails
+If those are also empty, the data isn't there yet. Check in Dispatcharr that:
 
-**Symptom**: Plex buffers or shows error during playback.
+- VOD content is loaded for at least one M3U account.
+- At least one VOD category is enabled.
+- The M3U account that owns the content is active.
 
-**Solutions**:
-1. Check 302 redirect: `curl -I http://127.0.0.1:8888/Movies/All/Movie.mkv`
-2. Verify redirect URL is accessible from Plex server
-3. Check Dispatcharr proxy is running
-4. Verify network connectivity between Plex and Dispatcharr
+VODFS only lists relations whose category is enabled **and** whose `m3u_account` matches that enabled category's account — a category enabled on one account does not surface content from a different account.
 
-### Missing Episodes
+## Playback Fails in Plex
 
-**Symptom**: Series directory shows no episodes.
+Plex sees the file and starts a play, then errors or buffers forever. The `302` redirect is the thing to interrogate:
 
-**Solutions**:
-1. Enable "Auto-hydrate Empty Series" in plugin settings
-2. Browse into the series directory to trigger hydration
-3. Check Dispatcharr has episode data for the series
-4. Verify series ID is stored in directory metadata
+```bash
+curl -I http://127.0.0.1:8888/Movies/All/"<filename>"
+```
 
-### Performance Issues
+Look at the `Location:` header. The host portion of that URL is the **Dispatcharr Base URL** plugin setting. Plex needs to be able to reach that host. If Dispatcharr is in Docker, set the base URL to the address Plex can resolve (LAN IP, hostname, or a Docker alias on a shared network), not `127.0.0.1`.
 
-**Symptom**: Slow directory listing or high memory usage.
+If the redirect URL looks right but Plex still errors, hit it directly with `curl -I` to confirm Dispatcharr's proxy is serving the stream.
 
-**Solutions**:
-1. Library should handle 10K+ items efficiently
-2. Check memory usage: `ps aux | grep vodfs`
-3. Verify Celery worker is running for background hydration
-4. Consider reducing category count if using custom categories
+## Slow Listings on Large Libraries
 
-### Credential Exposure
+The `/All` directories are the heavy ones — they walk every enabled relation. A few options:
 
-**Symptom**: API key appears in logs.
+- Attach Plex to category folders instead so each library is smaller.
+- Raise `--dir-cache-time` on the rclone mount so the same `ls` doesn't re-query VODFS repeatedly.
+- Check that the directory cache (`plugin/cache.py`) is actually hot; restart the plugin if you're seeing cold-query latency on every request.
 
-**Solutions**:
-1. This should never happen - report as bug
-2. Check log level is not set to DEBUG
-3. Verify error messages use "REDACTED" for sensitive data
-4. Rotate API key if exposure is confirmed
+## Authentication Failures
 
-## Log Locations
+You enabled token auth, set `headers =` in the rclone config, and now everything returns `401`. Common causes:
 
-- Plugin logs: Dispatcharr application logs
-- Server logs: stdout/stderr of child process
-- PID file: `/data/plugins/vodfs/server.pid`
+- The header value has the literal placeholder `<your-dispatcharr-api-key>` instead of a real key.
+- The key was revoked or regenerated in Dispatcharr.
+- The `Authorization` line is in the wrong rclone block (it must be under the `[vodfs]` remote, not a different one).
 
-## Getting Help
+VODFS accepts either `Authorization: ApiKey <key>` or `X-API-Key: <key>`. The rclone `headers =` syntax produces the first form.
 
-1. Check this troubleshooting guide first
-2. Review plugin logs for error messages
-3. Verify rclone configuration
-4. Test with `curl` commands to isolate issues
-5. Report bugs with full error output and configuration
+## Where Things Live
+
+- Plugin logs: Dispatcharr application log, lines prefixed `[vodfs]`.
+- Child server log: `/data/plugins/vodfs/server.log`.
+- PID file: `/data/plugins/vodfs/server.pid`.
+
+When opening a bug report, include the relevant lines from both logs and the output of `curl -I` on the URL that misbehaved.

@@ -1,22 +1,12 @@
 # VODFS for Dispatcharr
 
-VODFS exposes your Dispatcharr VOD library as a simple HTTP filesystem that rclone can mount for Plex, Jellyfin, Emby, or ordinary browsing.
+VODFS exposes your Dispatcharr VOD library as a read-only HTTP filesystem. Point rclone at it, mount the result, and Plex, Jellyfin, or Emby will see your movies and series as ordinary folders and files.
 
-It does not copy media, scan provider playlists itself, or maintain a separate library. Dispatcharr stays the source of truth. VODFS only asks Dispatcharr what movies, series, seasons, and episodes are currently enabled, then returns folder listings and redirects playback back through Dispatcharr's VOD proxy.
+Dispatcharr stays the source of truth. VODFS does not copy media, scan playlists, or hold its own library. Every directory listing is a live query against Dispatcharr's database, and every file open is a `302` redirect into Dispatcharr's existing VOD proxy. The plugin is small on purpose: if it broke or vanished tomorrow, Dispatcharr would still work.
 
-## What You Get
+## Layout
 
-- Browse Dispatcharr VOD as folders and files.
-- Mount the library with rclone.
-- Add `/Movies/All` and `/Series/All` to Plex.
-- Browse enabled Dispatcharr VOD categories as folders.
-- Keep multiple provider streams as separate playable files.
-- Stream through Dispatcharr's existing proxy instead of exposing provider URLs.
-- Get a copy/paste rclone config from `http://<vodfs-host>:8888/rclone_conf`.
-
-## How It Looks
-
-After mounting, the filesystem looks like this:
+Once mounted, the filesystem looks like this:
 
 ```text
 /mnt/vodfs
@@ -39,83 +29,52 @@ After mounting, the filesystem looks like this:
           S01E01 - Pilot - STRONG-11111.mkv
 ```
 
-`All` is a sibling of your categories. It is not a parent folder. This makes Plex setup simple: point movie libraries at `/Movies/All` and TV libraries at `/Series/All`.
+`All` is a sibling of the category folders, not a parent. That makes Plex setup boringly simple — point a movie library at `/Movies/All`, a TV library at `/Series/All`, and you're done. If a title is carried by more than one provider, each stream shows up as its own file. Pick the one you want; the rest are there if a stream goes down.
 
 ## Requirements
 
-- Dispatcharr with VOD content already loaded.
-- One or more enabled VOD categories in Dispatcharr.
-- [rclone](https://rclone.org/downloads/) installed on the machine that will mount the filesystem.
-- FUSE support on that same machine so rclone can create a real mounted folder.
-- Plex, Jellyfin, Emby, or another client that can read from that mounted folder.
+- Dispatcharr with VOD content already loaded and at least one VOD category enabled.
+- [rclone](https://rclone.org/downloads/) installed on the host that will read the media (typically the Plex host).
+- FUSE on that same host so `rclone mount` can produce a real directory.
+- A client — Plex, Jellyfin, Emby, or just `ls` — that can read from the mount point.
 
-Important: rclone must run on the same host that Plex reads media from.
-
-For a typical Plex setup, that means:
+rclone has to run wherever Plex reads media from. In a Docker setup that usually means mounting on the host and bind-mounting the result into the Plex container:
 
 ```text
 Dispatcharr/VODFS server  --->  rclone mount on Plex host  --->  Plex library path
 ```
 
-If Plex is running in Docker, the rclone mount must be visible inside the Plex container. Usually that means mounting VODFS on the Docker host, then bind-mounting `/mnt/vodfs` into the Plex container.
-
-### FUSE Notes
-
-rclone mounts use FUSE. On Linux, make sure FUSE is installed and usable before continuing.
-
-Debian/Ubuntu examples:
+On Debian/Ubuntu:
 
 ```bash
 sudo apt install rclone fuse3
 ```
 
-If you use `--allow-other`, `/etc/fuse.conf` may need:
-
-```text
-user_allow_other
-```
-
-Without FUSE support, `rclone mount` will fail or Plex will not see the mounted filesystem.
+If you plan to use `--allow-other`, add `user_allow_other` to `/etc/fuse.conf`.
 
 ## Install
 
 1. Install the plugin in Dispatcharr.
-2. Open Dispatcharr settings for the VODFS plugin.
-3. Choose an HTTP port. The default is `8888`.
-4. Set the Dispatcharr Base URL if needed.
-5. Click **Enable HTTP Filesystem**.
+2. Open the VODFS settings.
+3. Pick an HTTP port (default `8888`) and set the Dispatcharr Base URL if it isn't reachable on the default.
+4. Click **Enable HTTP Filesystem**.
 
-For most local installs, the default settings are enough.
+For most local installs the defaults are fine.
 
-## Get Your rclone Config
+## rclone Configuration
 
-After enabling the plugin, open this URL in your browser:
+The plugin generates a ready-to-paste config. After enabling it, open:
 
 ```text
 http://<vodfs-host>:8888/rclone_conf
 ```
 
-Examples:
+The page returns plain text containing the `[vodfs]` remote block, a suggested mount point, the mount command, the Plex library paths, and an optional `headers =` line for secured installs. Whatever host you opened the page from is the host that ends up in `url =`, so use the IP that rclone will actually be able to reach (typically the Docker container or LAN address, not `127.0.0.1`).
 
-```text
-http://127.0.0.1:8888/rclone_conf
-http://192.168.1.21:8888/rclone_conf
-http://172.19.0.2:8888/rclone_conf
-```
-
-The page returns plain text you can copy directly into your `rclone.conf`. It includes:
-
-- the `[vodfs]` remote block
-- a suggested mount point
-- the mount command
-- Plex movie and series paths
-- the optional API key header for secured installs
-
-Example output:
+Sample output:
 
 ```ini
 # VODFS rclone remote
-# Paste the [vodfs] block into your rclone.conf file.
 # Suggested mount point: /mnt/vodfs
 # Mount command:
 #   mkdir -p /mnt/vodfs
@@ -123,7 +82,6 @@ Example output:
 # Plex library paths:
 #   Movies: /mnt/vodfs/Movies/All
 #   Series: /mnt/vodfs/Series/All
-# Secured installs: enable plugin auth, then uncomment the headers line and replace the placeholder.
 
 [vodfs]
 type = http
@@ -131,76 +89,38 @@ url = http://192.168.1.21:8888/
 # headers = Authorization, ApiKey <your-dispatcharr-api-key>
 ```
 
-## Mount With rclone
+## Mounting
 
-Run these commands on the same machine that runs Plex, or on the host that provides Plex's media folders.
-
-Create your mount point:
+Run on the host that serves media to Plex:
 
 ```bash
 sudo mkdir -p /mnt/vodfs
-```
-
-Mount VODFS:
-
-```bash
 rclone mount vodfs: /mnt/vodfs --allow-other --vfs-cache-mode off --dir-cache-time 5s --poll-interval 0
 ```
 
-For a background mount, add `--daemon`:
+Add `--daemon` to background it. To unmount:
 
 ```bash
-rclone mount vodfs: /mnt/vodfs --allow-other --vfs-cache-mode off --dir-cache-time 5s --poll-interval 0 --daemon
+fusermount -u /mnt/vodfs
 ```
 
-Quick check:
+The recommended flags are aggressive about freshness because Dispatcharr's enabled-content set can change at any time. If you have a stable library and want faster `ls`, raise `--dir-cache-time`.
 
-```bash
-ls /mnt/vodfs
-ls /mnt/vodfs/Movies/All
-ls /mnt/vodfs/Series/All
-```
+## Plex
 
-## Add to Plex
+Add a Movie library pointed at `/mnt/vodfs/Movies/All` and a TV library pointed at `/mnt/vodfs/Series/All`, then scan. For smaller, more focused libraries you can point Plex at individual categories instead, e.g. `/mnt/vodfs/Movies/[EN] NEW RELEASES` or `/mnt/vodfs/Series/APPLE+ SERIES`.
 
-In Plex Media Server:
+## Authentication
 
-1. Add a movie library.
-2. Use this folder:
+By default VODFS is open on the configured port. If your Dispatcharr host isn't on a trusted network, enable **Authentication (Token-based)** in the plugin settings. VODFS will then require a valid Dispatcharr API key on every request, sent either as `Authorization: ApiKey <key>` or `X-API-Key: <key>`.
 
-```text
-/mnt/vodfs/Movies/All
-```
+To find or generate the key:
 
-3. Add a TV library.
-4. Use this folder:
+1. In Dispatcharr, click your avatar in the lower-left.
+2. Open the **API & XC** tab.
+3. Generate a key if you don't have one and copy it.
 
-```text
-/mnt/vodfs/Series/All
-```
-
-5. Scan the libraries.
-
-You can also point Plex at category folders if you want smaller libraries, for example:
-
-```text
-/mnt/vodfs/Movies/[EN] NEW RELEASES
-/mnt/vodfs/Series/APPLE+ SERIES
-```
-
-## Secured Installs
-
-VODFS can require a Dispatcharr API key. Enable **Authentication (Token-based)** in the plugin settings.
-
-To find or create your Dispatcharr API key:
-
-1. Open Dispatcharr.
-2. Click your username/avatar in the lower-left sidebar.
-3. Open the **API & XC** tab.
-4. Click **Generate API Key** if one does not already exist.
-5. Click the copy icon next to **API Key**.
-
-Then use this in your rclone config:
+Then uncomment the `headers =` line in your rclone config:
 
 ```ini
 [vodfs]
@@ -209,67 +129,33 @@ url = http://192.168.1.21:8888/
 headers = Authorization, ApiKey <your-dispatcharr-api-key>
 ```
 
-Use an active Dispatcharr API key. No new VODFS-specific password is created.
+VODFS reuses existing Dispatcharr keys. It does not invent a separate password.
 
 ## How It Works
 
-At a high level:
+A directory listing is just a Django ORM query against Dispatcharr's `M3UMovieRelation`, `M3USeriesRelation`, and `M3UEpisodeRelation` tables, filtered to the categories and accounts you have enabled, rendered as the same minimal HTML index rclone's `http` backend already speaks. A file open is parsed back to a stream ID and turned into a `302` to Dispatcharr's `/proxy/vod/movie/...` or `/proxy/vod/episode/...` endpoint. Dispatcharr handles the byte streaming; VODFS never touches media data.
 
-1. rclone asks VODFS for a folder listing.
-2. VODFS queries Dispatcharr's database for the currently enabled VOD categories and content.
-3. VODFS returns a normal HTML directory listing that rclone understands.
-4. When a player opens a file, VODFS returns an HTTP `302` redirect to Dispatcharr's VOD proxy.
-5. Dispatcharr streams the media from the provider.
+This is why the plugin can stay roughly a thousand lines and why it doesn't drift out of sync with Dispatcharr — there is no second copy of the library to drift.
 
-VODFS does not proxy video bytes itself. That keeps the plugin lightweight and lets Dispatcharr handle the actual streaming path.
+For implementation detail, see [`architecture/OVERVIEW.md`](architecture/OVERVIEW.md) and [`architecture/HTTPFS.md`](architecture/HTTPFS.md).
 
 ## Troubleshooting
 
-### The rclone config page does not open
+**The rclone config page won't open.** Check that the server is up: `curl http://127.0.0.1:8888/healthz`. If Dispatcharr is in Docker, you need the container IP or a mapped host port, not loopback.
 
-Check that the plugin server is running:
-
-```bash
-curl http://127.0.0.1:8888/healthz
-```
-
-If Dispatcharr runs in Docker, use the container IP or host-mapped address instead of `127.0.0.1`.
-
-### rclone mounts, but folders are empty
-
-Check these in Dispatcharr:
-
-- VOD content exists.
-- VOD categories are enabled.
-- The provider/account for that content is enabled.
-
-Then try:
+**rclone mounts but the folders are empty.** Confirm in Dispatcharr that VOD content exists, the relevant categories are enabled, and the providing M3U account is active. Then sanity-check from the same host:
 
 ```bash
 curl http://127.0.0.1:8888/Movies/
 curl http://127.0.0.1:8888/Series/
 ```
 
-### Plex sees movies but playback fails
+**Plex sees titles but playback fails.** The redirect from VODFS points at the **Dispatcharr Base URL** plugin setting. That URL needs to be reachable from the Plex host, not just from Dispatcharr's own host. Set it to a LAN address or container alias that Plex can actually resolve.
 
-Make sure the **Dispatcharr Base URL** plugin setting is reachable from the machine running Plex/rclone. Playback redirects go to Dispatcharr's proxy, not directly to the IPTV provider.
+**Plex scans are slow.** Start with the `/All` directories — they're the largest. If scans drag, attach Plex to specific categories instead so each library is smaller and more cacheable.
 
-### Plex scans too slowly
-
-Start with `/Movies/All` and `/Series/All`. If the library is very large, consider adding category-specific libraries so Plex scans smaller folders.
-
-### Stop the mount
-
-```bash
-fusermount -u /mnt/vodfs
-```
-
-## More Detail
-
-- Architecture: [`architecture/OVERVIEW.md`](architecture/OVERVIEW.md)
-- HTTP behavior: [`architecture/HTTPFS.md`](architecture/HTTPFS.md)
-- Troubleshooting notes: [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
+More notes in [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
 
 ## License
 
-MIT License.
+MIT.
