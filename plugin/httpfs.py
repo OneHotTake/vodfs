@@ -1,12 +1,12 @@
 """HTTP filesystem request handlers with lazy resolution and caching"""
 
 import logging
+import asyncio
 from typing import Dict, Any, Optional, List
 from fastapi import Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
-from jinja2 import Template
+from jinja2 import Template, select_autoescape
 from urllib.parse import quote
-import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
 try:
@@ -21,6 +21,42 @@ logger = logging.getLogger(__name__)
 
 _executor = ThreadPoolExecutor(max_workers=4)
 _directory_cache = LRUCache(max_size=5000, ttl=600)
+
+_DIR_LISTING_TEMPLATE = Template("""<!DOCTYPE html>
+<html>
+<head>
+    <title>Index of {{ path }}</title>
+    <style>
+        body { font-family: monospace; padding: 20px; }
+        h1 { margin-bottom: 20px; }
+        table { border-collapse: collapse; width: 100%; }
+        th { text-align: left; padding: 5px; border-bottom: 1px solid #ccc; }
+        td { padding: 5px; }
+        a { text-decoration: none; color: #0066cc; }
+        a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <h1>Index of {{ path }}</h1>
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Size</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for entry in entries %}
+            <tr>
+                <td><a href="{{ entry.href }}">{{ entry.name }}</a></td>
+                <td>{{ entry.get('size', '') }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</body>
+</html>
+""", autoescape=True)
 
 
 class HTTPFilesystem:
@@ -40,7 +76,8 @@ class HTTPFilesystem:
 
     async def handle_get(self, path: str, request: Request) -> Response:
         """Handle GET request with lazy resolution"""
-        node = self.tree.resolve_path_with_db(path)
+        loop = asyncio.get_running_loop()
+        node = await loop.run_in_executor(_executor, self.tree.resolve_path_with_db, path)
 
         if node is None:
             return Response(status_code=404, content="Not found")
@@ -55,7 +92,8 @@ class HTTPFilesystem:
 
     async def handle_head(self, path: str, request: Request) -> Response:
         """Handle HEAD request with lazy resolution"""
-        node = self.tree.resolve_path_with_db(path)
+        loop = asyncio.get_running_loop()
+        node = await loop.run_in_executor(_executor, self.tree.resolve_path_with_db, path)
 
         if node is None:
             return Response(status_code=404, content="Not found")
@@ -72,6 +110,7 @@ class HTTPFilesystem:
         """Serve directory listing with lazy query + cache"""
         try:
             components = [c for c in path.split("/") if c]
+            loop = asyncio.get_running_loop()
 
             cache_key = f"dir:{path}"
             cached = _directory_cache.get(cache_key)
@@ -88,14 +127,14 @@ class HTTPFilesystem:
                 # /Movies/ - list categories + All
                 entries = [{"name": "../", "href": "../", "size": ""}]
                 entries.append({"name": "All/", "href": "All/", "size": ""})
-                categories = self.tree.get_enabled_categories('movie')
+                categories = await loop.run_in_executor(_executor, self.tree.get_enabled_categories, 'movie')
                 for cat in categories:
                     entries.append({"name": cat + "/", "href": cat + "/", "size": ""})
             elif components[0] == "Series" and len(components) == 1:
                 # /Series/ - list categories + All
                 entries = [{"name": "../", "href": "../", "size": ""}]
                 entries.append({"name": "All/", "href": "All/", "size": ""})
-                categories = self.tree.get_enabled_categories('series')
+                categories = await loop.run_in_executor(_executor, self.tree.get_enabled_categories, 'series')
                 for cat in categories:
                     entries.append({"name": cat + "/", "href": cat + "/", "size": ""})
             elif components[0] == "Movies" and len(components) >= 2:
@@ -111,12 +150,12 @@ class HTTPFilesystem:
             elif components[0] == "Series" and len(components) == 3:
                 # /Series/{Category}/{Show}/ - list seasons
                 series_name = components[2]
-                entries = await self._get_seasons_listing(series_name)
+                entries = await self._get_seasons_listing(series_name, components[1])
             elif components[0] == "Series" and len(components) >= 4:
                 # /Series/{Category}/{Show}/S01/ - list episodes
                 series_name = components[2]
                 season_name = components[3]
-                entries = await self._get_episodes_listing(series_name, season_name)
+                entries = await self._get_episodes_listing(series_name, season_name, components[1])
             else:
                 entries = []
 
@@ -127,13 +166,12 @@ class HTTPFilesystem:
 
         except Exception as e:
             logger.error("Failed to serve directory %s: %s", path, e)
-            import traceback
-            logger.error(traceback.format_exc())
+            logger.debug("Full traceback:", exc_info=True)
             return Response(status_code=500, content="Error listing directory")
 
     async def _get_movies_listing(self, category: Optional[str]) -> List[Dict[str, str]]:
         """Get movies listing with lazy DB query"""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         movies = await loop.run_in_executor(_executor, self.tree.get_movies_from_db, category)
 
         entries = [{"name": "../", "href": "../", "size": ""}]
@@ -151,7 +189,7 @@ class HTTPFilesystem:
 
     async def _get_series_listing(self, category: Optional[str]) -> List[Dict[str, str]]:
         """Get series listing with lazy DB query"""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         series = await loop.run_in_executor(_executor, self.tree.get_series_from_db, category)
 
         entries = [{"name": "../", "href": "../", "size": ""}]
@@ -166,18 +204,24 @@ class HTTPFilesystem:
 
         return entries
 
-    async def _get_seasons_listing(self, series_name: str) -> List[Dict[str, str]]:
+    async def _get_seasons_listing(self, series_name: str, category: str) -> List[Dict[str, str]]:
         """Get seasons/episodes listing with lazy DB query"""
         logger.info("_get_seasons_listing called for: %s", series_name)
-        series_uuid = self._extract_series_uuid(series_name)
+        loop = asyncio.get_running_loop()
+        series_uuid = await loop.run_in_executor(_executor, self.tree.find_series_uuid_by_name, series_name)
         logger.info("_get_seasons_listing found UUID: %s", series_uuid)
 
         if not series_uuid:
             logger.warning("Could not find UUID for series: %s", series_name)
             return []
 
-        loop = asyncio.get_event_loop()
         seasons = await loop.run_in_executor(_executor, self.tree.get_seasons_from_db, series_uuid)
+
+        series_dir = await loop.run_in_executor(_executor, self.tree.resolve_path_with_db, f"/Series/{category}/{series_name}")
+        if series_dir and isinstance(series_dir, DirectoryNode):
+            for season in seasons:
+                if not series_dir.find_child(season.name):
+                    series_dir.add_child(season)
 
         entries = [{"name": "../", "href": "../", "size": ""}]
 
@@ -191,18 +235,28 @@ class HTTPFilesystem:
 
         return entries
 
-    async def _get_episodes_listing(self, series_name: str, season_name: str) -> List[Dict[str, str]]:
+    async def _get_episodes_listing(self, series_name: str, season_name: str, category: str) -> List[Dict[str, str]]:
         """Get episodes listing for a specific season with lazy DB query"""
         logger.info("_get_episodes_listing called for: %s/%s", series_name, season_name)
-        series_uuid = self._extract_series_uuid(series_name)
+        loop = asyncio.get_running_loop()
+        series_uuid = await loop.run_in_executor(_executor, self.tree.find_series_uuid_by_name, series_name)
         logger.info("_get_episodes_listing found UUID: %s", series_uuid)
 
         if not series_uuid:
             logger.warning("Could not find UUID for series: %s", series_name)
             return []
 
-        loop = asyncio.get_event_loop()
         seasons = await loop.run_in_executor(_executor, self.tree.get_seasons_from_db, series_uuid)
+
+        series_dir = await loop.run_in_executor(_executor, self.tree.resolve_path_with_db, f"/Series/{category}/{series_name}")
+        if series_dir and isinstance(series_dir, DirectoryNode):
+            for season in seasons:
+                existing = series_dir.find_child(season.name)
+                if not existing:
+                    series_dir.add_child(season)
+                elif not existing.children:
+                    for child in season.children:
+                        existing.add_child(child)
 
         entries = [{"name": "../", "href": "../", "size": ""}]
 
@@ -220,10 +274,6 @@ class HTTPFilesystem:
                 break
 
         return entries
-
-    def _extract_series_uuid(self, series_name: str) -> Optional[str]:
-        """Extract series UUID from series directory name using live DB query"""
-        return self.tree.find_series_uuid_by_name(series_name)
 
     async def serve_file(self, node: FileNode) -> Response:
         """Serve file - redirect to stream URL"""
@@ -263,41 +313,4 @@ class HTTPFilesystem:
 
     def _render_directory_html(self, path: str, entries: list) -> str:
         """Render directory listing HTML"""
-        template_str = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Index of {{ path }}</title>
-    <style>
-        body { font-family: monospace; padding: 20px; }
-        h1 { margin-bottom: 20px; }
-        table { border-collapse: collapse; width: 100%; }
-        th { text-align: left; padding: 5px; border-bottom: 1px solid #ccc; }
-        td { padding: 5px; }
-        a { text-decoration: none; color: #0066cc; }
-        a:hover { text-decoration: underline; }
-    </style>
-</head>
-<body>
-    <h1>Index of {{ path }}</h1>
-    <table>
-        <thead>
-            <tr>
-                <th>Name</th>
-                <th>Size</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for entry in entries %}
-            <tr>
-                <td><a href="{{ entry.href }}">{{ entry.name }}</a></td>
-                <td>{{ entry.get('size', '') }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</body>
-</html>
-"""
-        template = Template(template_str)
-        return template.render(path=path, entries=entries)
+        return _DIR_LISTING_TEMPLATE.render(path=path, entries=entries)

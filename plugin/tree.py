@@ -1,9 +1,10 @@
 """Virtual filesystem tree implementation with live DB queries"""
 
+import re
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional, Any, Dict
-import logging
 
 try:
     from .integration import _get_dispatcharr_base_url, DispatcharrIntegrator
@@ -104,40 +105,6 @@ class VirtualTree:
         self._movies_all = self._movies_root.add_directory("All")
         self._series_all = self._series_root.add_directory("All")
 
-    def resolve_path(self, path: str) -> Optional[FSNode]:
-        """Resolve a filesystem path to a node"""
-        if not path or path == "/":
-            return self.root
-
-        components = [c for c in path.split("/") if c]
-
-        current = self.root
-        for component in components:
-            if not current.is_directory():
-                return None
-
-            current = current.find_child(component)
-            if current is None:
-                return None
-
-        return current
-
-    def get_movies_root(self) -> Optional[DirectoryNode]:
-        """Get Movies root directory"""
-        return self._movies_root
-
-    def get_series_root(self) -> Optional[DirectoryNode]:
-        """Get Series root directory"""
-        return self._series_root
-
-    def get_movies_all(self) -> Optional[DirectoryNode]:
-        """Get Movies/All directory"""
-        return self._movies_all
-
-    def get_series_all(self) -> Optional[DirectoryNode]:
-        """Get Series/All directory"""
-        return self._series_all
-
     def resolve_path_with_db(self, path: str) -> Optional[FSNode]:
         """Resolve path with on-demand directory creation"""
         if not path or path == "/":
@@ -195,9 +162,17 @@ class VirtualTree:
         # /Movies/All/{MovieFile} or /Movies/{Category}/{MovieFile}
         if len(components) >= 2:
             filename = components[-1]
-            file_node = FileNode(filename, "", 0, "video/x-matroska")
-            file_node.metadata["placeholder"] = True
-            return file_node
+            parent = self._resolve_movies_path(components[:-1])
+            if parent and isinstance(parent, DirectoryNode):
+                existing = parent.find_child(filename)
+                if existing:
+                    return existing
+            file_node = self._resolve_movie_by_filename(filename)
+            if file_node:
+                if parent and isinstance(parent, DirectoryNode):
+                    parent.add_child(file_node)
+                return file_node
+            return None
 
         return None
 
@@ -240,7 +215,7 @@ class VirtualTree:
             return show_dir
 
         # /Series/All/{Show}/S01/ (season directory)
-        if len(components) >= 3:
+        if len(components) == 3:
             parent = self._resolve_series_path(components[:2])
             if not parent or not isinstance(parent, DirectoryNode):
                 return None
@@ -251,6 +226,18 @@ class VirtualTree:
                 season_dir = parent.add_directory(season_name)
 
             return season_dir
+
+        # /Series/All/{Show}/S01/{episode file}
+        if len(components) >= 4:
+            parent = self._resolve_series_path(components[:3])
+            if not parent or not isinstance(parent, DirectoryNode):
+                return None
+
+            filename = components[-1]
+            existing = parent.find_child(filename)
+            if existing:
+                return existing
+            return None
 
         return None
 
@@ -267,7 +254,6 @@ class VirtualTree:
             return series
 
         # Try parsing "Name (Year)" format
-        import re
         match = re.match(r'^(.+?)\s*\((\d{4})\)\s*$', display_name)
         if match:
             name_part = match.group(1)
@@ -310,62 +296,88 @@ class VirtualTree:
 
         base_url = _get_dispatcharr_base_url()
 
-        # Query base - only movies in ENABLED categories
         queryset = Movie.objects.filter(
-            m3umovierelation__category__m3u_relations__enabled=True
+            m3u_relations__category__m3u_relations__enabled=True
         ).select_related('logo').distinct()
 
-        # Filter by category if specified
         if category:
             queryset = queryset.filter(
-                m3umovierelation__category__name=category
+                m3u_relations__category__name=category
             ).distinct()
 
-        logger.info("get_movies_from_db: querying %d movies (category=%s)", queryset.count(), category)
         result = []
-        for movie in queryset:
-            relations = M3UMovieRelation.objects.filter(movie=movie).select_related(
-                'category', 'm3u_account'
+        movie_ids = list(queryset.values_list('id', flat=True))
+        relations = M3UMovieRelation.objects.filter(
+            movie_id__in=movie_ids
+        ).select_related('movie', 'category', 'm3u_account')
+
+        for rel in relations:
+            if not rel.category or not rel.category.m3u_relations.filter(
+                m3u_account=rel.m3u_account, enabled=True
+            ).exists():
+                continue
+
+            if category and rel.category.name != category:
+                continue
+
+            stream_url = f"{base_url}/proxy/vod/movie/{rel.movie.uuid}?stream_id={rel.stream_id}"
+
+            provider_short = rel.m3u_account.name[:20] if rel.m3u_account else "Unknown"
+            filename = integrator.build_filename(
+                rel.movie.name, rel.movie.year, provider_short,
+                rel.stream_id, rel.container_extension or "mkv"
             )
 
-            for rel in relations:
-                # Skip if category is not enabled for this M3U account
-                if not rel.category or not rel.category.m3u_relations.filter(
-                    m3u_account=rel.m3u_account, enabled=True
-                ).exists():
-                    continue
+            size = 0
+            if rel.movie.duration_secs:
+                size = rel.movie.duration_secs * 250 * 1024
+            else:
+                size = 6000 * 250 * 1024
 
-                # Skip if category filter active and this relation doesn't match
-                if category and rel.category.name != category:
-                    continue
-
-                stream_url = f"{base_url}/proxy/vod/movie/{movie.uuid}?stream_id={rel.stream_id}"
-
-                provider_short = rel.m3u_account.name[:20] if rel.m3u_account else "Unknown"
-                filename = integrator.build_filename(
-                    movie.name, movie.year, provider_short,
-                    rel.stream_id, rel.container_extension or "mkv"
-                )
-
-                size = 0
-                if movie.duration_secs:
-                    size = movie.duration_secs * 250 * 1024
-                else:
-                    size = 6000 * 250 * 1024  # 100 min default
-
-                file_node = FileNode(filename, stream_url, size, "video/x-matroska")
-                result.append(file_node)
+            file_node = FileNode(filename, stream_url, size, "video/x-matroska")
+            result.append(file_node)
 
         return result
+
+    def _resolve_movie_by_filename(self, filename: str) -> Optional[FileNode]:
+        """Resolve a movie file by filename via DB lookup on stream_id"""
+        try:
+            from apps.vod.models import Movie, M3UMovieRelation
+        except ImportError:
+            return None
+
+        try:
+            from integration import DispatcharrIntegrator
+        except ImportError:
+            from .integration import DispatcharrIntegrator
+
+        parts = filename.rsplit('-', 1)
+        if len(parts) < 2:
+            return None
+        stream_id = parts[-1].rsplit('.', 1)[0]
+
+        try:
+            rel = M3UMovieRelation.objects.select_related('movie', 'm3u_account', 'category').get(stream_id=stream_id)
+        except M3UMovieRelation.DoesNotExist:
+            return None
+
+        if not rel.category or not rel.category.m3u_relations.filter(
+            m3u_account=rel.m3u_account, enabled=True
+        ).exists():
+            return None
+
+        base_url = _get_dispatcharr_base_url()
+        stream_url = f"{base_url}/proxy/vod/movie/{rel.movie.uuid}?stream_id={rel.stream_id}"
+        size = (rel.movie.duration_secs or 6000) * 250 * 1024
+        return FileNode(filename, stream_url, size, "video/x-matroska")
 
     def get_series_from_db(self, category: Optional[str] = None) -> List[DirectoryNode]:
         """Get series from DB (live query, only enabled categories)"""
         try:
-            from apps.vod.models import Series, M3USeriesRelation
+            from apps.vod.models import Series
         except ImportError:
             return []
 
-        # Build query: series that have relations in enabled categories
         queryset = Series.objects.filter(
             m3u_relations__category__m3u_relations__enabled=True
         ).distinct()
@@ -377,18 +389,6 @@ class VirtualTree:
 
         result = []
         for series in queryset:
-            # Get enabled categories for this series
-            series_categories = list(
-                M3USeriesRelation.objects.filter(series=series)
-                .filter(category__m3u_relations__enabled=True)
-                .values_list('category__name', flat=True)
-                .distinct()
-            )
-
-            # If category filter specified, skip series not in that category
-            if category and category not in series_categories:
-                continue
-
             series_name = series.name
             if series.year and f"({series.year})" not in series.name:
                 series_name = f"{series.name} ({series.year})"

@@ -1,34 +1,27 @@
-"""FastAPI HTTP server for VOD filesystem - live DB queries, no manifest caching"""
+"""FastAPI HTTP server for VOD filesystem - live DB queries"""
 
 import logging
 import os
-import threading
 import uvicorn
-from datetime import datetime
-from typing import Optional, List
+from typing import List
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import Response, JSONResponse
 
 try:
     from .tree import VirtualTree
     from .httpfs import HTTPFilesystem
-    from .cache import LRUCache
     from .integration import DispatcharrIntegrator
 except (ImportError, AttributeError):
     from tree import VirtualTree
     from httpfs import HTTPFilesystem
-    from cache import LRUCache
     from integration import DispatcharrIntegrator
 
 logger = logging.getLogger(__name__)
 
 _ENABLE_AUTH = os.environ.get("VODFS_ENABLE_AUTH", "false").lower() == "true"
 
-
-# Global state
 _server_ready = False
 _startup_errors: List[str] = []
-_directory_cache = LRUCache(max_size=5000, ttl=600)
 
 
 def check_network_access(request: Request):
@@ -73,31 +66,17 @@ def check_api_key_auth(request: Request):
         )
 
 
-def _initialize_on_startup_sync():
-    """Mark server as ready (no manifest/hydration needed - live DB queries)"""
+def _check_django_available():
+    """Check Django availability at startup"""
     global _server_ready, _startup_errors
 
-    try:
-        integrator = DispatcharrIntegrator()
-        if integrator.is_available():
-            logger.info("Django available - all queries will be live against DB")
-        else:
-            logger.warning("Django not available - queries will return empty results")
+    integrator = DispatcharrIntegrator()
+    if integrator.is_available():
+        logger.info("Django available - all queries will be live against DB")
+    else:
+        logger.warning("Django not available - queries will return empty results")
 
-        _server_ready = True
-        logger.info("Server ready")
-
-    except Exception as e:
-        logger.error("Failed to initialize: %s", e)
-        _startup_errors.append(str(e))
-        import traceback
-        logger.error(traceback.format_exc())
-
-
-def _initialize_on_startup():
-    """Initialize on startup (runs in thread)"""
-    thread = threading.Thread(target=_initialize_on_startup_sync, daemon=True)
-    thread.start()
+    _server_ready = True
 
 
 def create_app(tree: VirtualTree) -> FastAPI:
@@ -107,8 +86,7 @@ def create_app(tree: VirtualTree) -> FastAPI:
 
     @app.on_event("startup")
     async def startup_event():
-        """Initialize on startup"""
-        _initialize_on_startup()
+        _check_django_available()
 
     @app.on_event("shutdown")
     async def shutdown_event():
@@ -174,7 +152,7 @@ def create_app(tree: VirtualTree) -> FastAPI:
         _auth=Depends(check_api_key_auth),
     ):
         """Root endpoint"""
-        return await httpfs.handle_request("/", Request(scope={"type": "http", "method": "GET"}))
+        return await httpfs.handle_request("/", request)
 
     return app
 

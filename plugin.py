@@ -7,88 +7,22 @@ Supports category browsing, multi-provider streaming, and episode hydration.
 
 import os
 import sys
+import json
 import signal
 import subprocess
 import logging
 from typing import Dict, Any
 from pathlib import Path
 
-# Plugin metadata
-name = "VOD HTTP Filesystem"
-version = "0.1.0"
-description = "Expose VOD library to Plex as mountable HTTP filesystem"
-author = "onehottake"
+with open(Path(__file__).parent / "plugin.json") as f:
+    _manifest = json.load(f)
 
-# Settings schema
-fields = [
-    {
-        "id": "enabled",
-        "label": "Enabled",
-        "type": "boolean",
-        "default": False
-    },
-    {
-        "id": "http_port",
-        "label": "HTTP Port",
-        "type": "number",
-        "default": 8888,
-        "min": 1024,
-        "max": 65535,
-        "help_text": "Port for the HTTP filesystem server"
-    },
-    {
-        "id": "auto_hydrate_empty_series",
-        "label": "Auto-hydrate Empty Series",
-        "type": "boolean",
-        "default": True,
-        "help_text": "Automatically fetch episodes when browsing Series directories"
-    },
-    {
-        "id": "dispatcharr_base_url",
-        "label": "Dispatcharr Base URL",
-        "type": "string",
-        "default": "http://127.0.0.1:9191",
-        "help_text": "Base URL of Dispatcharr instance (must be reachable from rclone/Plex)"
-    },
-    {
-        "id": "enable_auth",
-        "label": "Enable Authentication (Token-based)",
-        "type": "boolean",
-        "default": False,
-        "help_text": "When enabled, require valid Dispatcharr API key (Authorization: ApiKey <key> or X-API-Key: <key>). Default OFF for easy browser troubleshooting."
-    }
-]
-
-# Available actions
-actions = [
-    {
-        "id": "enable",
-        "label": "Enable HTTP Filesystem",
-        "description": "Start the HTTP filesystem server",
-        "button_label": "🚀 Enable",
-        "button_variant": "filled",
-        "button_color": "green"
-    },
-    {
-        "id": "disable",
-        "label": "Disable HTTP Filesystem",
-        "description": "Stop the HTTP filesystem server",
-        "button_label": "🛑 Disable",
-        "button_variant": "outline",
-        "button_color": "red",
-        "confirm": {
-            "message": "Are you sure you want to stop the HTTP filesystem server?"
-        }
-    },
-    {
-        "id": "show_rclone_config",
-        "label": "Show rclone Configuration",
-        "description": "Display the rclone configuration for mounting this filesystem",
-        "button_label": "📋 rclone Config",
-        "button_variant": "outline",
-        "button_color": "cyan"
-    }
-]
+name = _manifest["name"]
+version = _manifest["version"]
+description = _manifest["description"]
+author = _manifest["author"]
+fields = _manifest["fields"]
+actions = _manifest["actions"]
 
 
 class Plugin:

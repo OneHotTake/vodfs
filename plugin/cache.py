@@ -2,8 +2,7 @@
 
 import time
 import logging
-from functools import wraps
-from typing import Callable, Any, Dict, Tuple
+from typing import Any, Dict
 from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
@@ -73,50 +72,4 @@ class LRUCache:
             "size": len(self._cache),
             "max_size": self.max_size,
             "ttl": self.ttl,
-            "utilization": f"{len(self._cache) / self.max_size * 100:.1f}%"
         }
-
-
-# Global cache instance
-_directory_cache = LRUCache(max_size=5000, ttl=600)
-
-
-def lru_cache_dir(ttl: int = 600):
-    """Decorator for caching directory listings"""
-    def decorator(func: Callable) -> Callable:
-        @wraps(func)
-        def wrapper(*args, **kwargs) -> Any:
-            # Build cache key from function args
-            # Normalize to string for consistent keys
-            cache_key_parts = [func.__name__]
-            cache_key_parts.extend(str(arg) for arg in args)
-            cache_key_parts.extend(f"{k}={v}" for k, v in sorted(kwargs.items()))
-            cache_key = ":".join(cache_key_parts)
-
-            # Try cache first
-            cached = _directory_cache.get(cache_key)
-            if cached is not None:
-                logger.debug("Cache hit for: %s", cache_key[:100])
-                return cached
-
-            # Cache miss - call function
-            result = func(*args, **kwargs)
-
-            # Store in cache
-            _directory_cache.set(cache_key, result)
-            logger.debug("Cache miss for: %s (size: %d)", cache_key[:100], _directory_cache.size())
-
-            return result
-        return wrapper
-    return decorator
-
-
-def get_cache_stats() -> Dict[str, Any]:
-    """Get global cache statistics"""
-    return _directory_cache.stats()
-
-
-def clear_cache() -> None:
-    """Clear global cache"""
-    _directory_cache.clear()
-    logger.info("Directory cache cleared")
