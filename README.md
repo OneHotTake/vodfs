@@ -1,489 +1,236 @@
-# VOD HTTP Filesystem Plugin
+# VODFS for Dispatcharr
 
-Expose your Dispatcharr VOD library to Plex and similar clients as a mountable HTTP filesystem using rclone.
+VODFS exposes your Dispatcharr VOD library as a simple HTTP filesystem that rclone can mount for Plex, Jellyfin, Emby, or ordinary browsing.
 
-> **Security note:** vodfs fully inherits Dispatcharr's network access rules and uses your existing API key for authentication. See the [Security & Access Control](#security--access-control) section for details.
+It does not copy media, scan provider playlists itself, or maintain a separate library. Dispatcharr stays the source of truth. VODFS only asks Dispatcharr what movies, series, seasons, and episodes are currently enabled, then returns folder listings and redirects playback back through Dispatcharr's VOD proxy.
 
-## Features
+## What You Get
 
-- **Virtual HTTP Filesystem**: Browse your VOD library as a directory structure
-- **Category Support**: Both "All" aggregate views and per-category browsing
-- **Multi-Provider Streaming**: Multiple streams for the same title appear as separate files
-- **Episode Hydration**: Automatically fetch episodes when browsing Series directories
-- **Dispatcharr Integration**: Uses Dispatcharr models, tasks, and proxy infrastructure
-- **302 Redirect Streaming**: All playback goes through Dispatcharr's optimized proxy
-- **Background Hydration**: Server starts immediately; library hydration runs in background thread
-- **Lazy Resolution**: Manifest + targeted DB queries for scalable directory listings (50k-150k items)
-- **Aggressive Startup Hydration**: All zero-episode series queued immediately on startup with 5 concurrent workers
-- **LRU Caching**: Directory listings cached (5000 entries, 600s TTL) for responsive browsing
+- Browse Dispatcharr VOD as folders and files.
+- Mount the library with rclone.
+- Add `/Movies/All` and `/Series/All` to Plex.
+- Browse enabled Dispatcharr VOD categories as folders.
+- Keep multiple provider streams as separate playable files.
+- Stream through Dispatcharr's existing proxy instead of exposing provider URLs.
+- Get a copy/paste rclone config from `http://<vodfs-host>:8888/rclone_conf`.
 
-## Architecture
+## How It Looks
 
-### High-Level Overview
+After mounting, the filesystem looks like this:
 
-```
-+-----------------+
-|   Dispatcharr   |  <-- Main Django process
-|  (Main Process) |      - Plugin management
-+--------+--------+      - VOD models & proxy
-         |
-         | Plugin Interface (run/stop hooks)
-         |
-+--------v--------+
-|  VODFS Plugin   |  <-- Control Plane
-|   (plugin.py)   |      - Starts child process
-|                 |      - Manages lifecycle
-|                 |      - Exposes UI settings
-+--------+--------+
-         |
-         | subprocess.Popen()
-         | (Django-initialized)
-         |
-+--------v----------------------------------+
-|  Child HTTP Process (FastAPI/uvicorn) |  <-- Service Plane
-|                                        |      - Serves HTTP directory listings
-|  +--------------------------------+   |      - Handles GET/HEAD requests
-|  |  Virtual Tree (tree.py)        |   |      - 302 redirects to proxy
-|  |  - Movies/Series structure     |   |
-|  |  - All + real categories       |   |
-|  +--------------------------------+   |
-|  +--------------------------------+   |
-|  |  HTTP Handlers (httpfs.py)     |   |
-|  |  - Directory listings (HTML)   |   |
-|  |  - 302 redirects               |   |
-|  |  - Lazy DB queries + cache     |   |
-|  +--------------------------------+   |
-|  +--------------------------------+   |
-|  |  Manifest (manifest.py)        |   |
-|  |  - Atomic JSON manifest        |   |
-|  |  - Watermark detection         |   |
-|  |  - Category/skeleton queries   |   |
-|  +--------------------------------+   |
-|  +--------------------------------+   |
-|  |  Cache (cache.py)              |   |
-|  |  - LRU directory cache         |   |
-|  |  - 5000 entries, 600s TTL      |   |
-|  +--------------------------------+   |
-|  +--------------------------------+   |
-|  |  Hydration (hydration.py)      |   |
-|  |  - Aggressive startup queue    |   |
-|  |  - 5 concurrent workers        |   |
-|  |  - Per-series exponential backoff |
-|  +--------------------------------+   |
-|  +--------------------------------+   |
-|  |  Integration (integration.py)  |   |
-|  |  - Django models (direct)      |   |
-|  |  - Proxy URL generation        |   |
-|  |  - Watermark queries           |   |
-|  +--------------------------------+   |
-+-----------------------------------------+
-         |
-         | HTTP 302 Redirect
-         |
-+--------v--------+
-|  Dispatcharr    |  <-- Streaming
-|     Proxy       |      - Handles auth
-|  (Streaming)    |      - Streams from M3U providers
-+--------+--------+
-         |
-         | Actual video stream
-         |
-+--------v--------+
-|  M3U Provider   |  <-- Xtream Codes API
-|  (MEGA/STRONG)  |      - Actual video content
-+-----------------+
-```
-
-### Component Lifecycle
-
-#### Enable (Start)
-
-1. User clicks **Enable HTTP Filesystem** in Dispatcharr UI
-2. Dispatcharr calls `Plugin.run("enable", params, context)`
-3. Plugin validates settings (port, auto_hydrate, dispatcharr_base_url)
-4. Plugin starts child HTTP process via `subprocess.Popen()`:
-   - Inherits Django-initialized Python environment
-   - Receives `VODFS_DISPATCHARR_BASE_URL` env var
-   - Runs `standalone_runner.py --port <port>`
-5. Plugin saves PID to `/data/plugins/vodfs/server.pid`
-6. Child process initializes:
-   - `django.setup()` already available from parent
-   - Builds virtual tree (`tree.py`)
-   - Starts uvicorn on `0.0.0.0:<port>`
-   - **Background thread** hydrates tree from Dispatcharr models
-7. Server immediately responds to requests (hydration happens in background)
-
-#### Disable (Stop)
-
-1. User clicks **Disable HTTP Filesystem** in Dispatcharr UI
-2. Dispatcharr calls `Plugin.run("disable", params, context)`
-3. Plugin reads PID from `/data/plugins/vodfs/server.pid`
-4. Plugin sends `SIGTERM` to child process
-5. Child process shuts down gracefully (uvicorn handles cleanup)
-6. Plugin removes PID file
-
-#### Reload/Restart
-
-1. Dispatcharr calls `Plugin.stop(context)` on plugin reload
-2. Plugin terminates child process via PID
-3. Plugin may be re-initialized with new settings
-4. User clicks **Enable** to start fresh
-
-#### Graceful Shutdown
-
-- `Plugin.stop()` is called on disable, delete, or reload
-- Sends `SIGTERM` to child process
-- Removes PID file
-- Child process (uvicorn) handles connection drain
-
-### Data Flow
-
-#### Directory Listing
-
-1. rclone requests GET /Movies/All/
-2. FastAPI handler receives request
-3. VirtualTree resolves path to DirectoryNode
-4. HTTP handler generates HTML directory listing
-5. Returns HTML with links to children
-6. rclone parses HTML and lists entries
-
-#### File Playback
-
-1. Plex requests HEAD /Movies/All/Movie (2024).mkv
-2. HTTP handler resolves path to FileNode
-3. HTTP handler returns metadata (size, content-type)
-4. Plex requests GET /Movies/All/Movie (2024).mkv
-5. HTTP handler returns 302 redirect:
-   `http://<dispatcharr_base>/proxy/vod/movie/{uuid}?stream_id={id}`
-6. Plex follows redirect to Dispatcharr proxy
-7. Dispatcharr proxy streams video from M3U provider
-8. Plex plays video
-
-#### Episode Hydration
-
-1. Server startup: All zero-episode series queued immediately
-2. 5 concurrent hydration workers process series in parallel
-3. Episodes fetched from M3U provider via Celery tasks
-4. Per-series exponential backoff on failure (max 5 min)
-5. Global circuit breaker reduces concurrency on 8+ failures/min
-6. Episodes available in DB for lazy queries on access
-
-### Configuration Settings
-
-| Setting | Description | Default |
-|---------|-------------|---------|
-| **HTTP Port** | Port for the HTTP filesystem server | 8888 |
-| **Auto-hydrate Empty Series** | Automatically fetch episodes when browsing | true |
-| **Dispatcharr Base URL** | Base URL of Dispatcharr instance (used for internal proxy redirects). Usually left at default. | http://127.0.0.1:9191 |
-| **Enable Authentication (Token-based)** | Require valid Dispatcharr API key for access | false |
-
-### Actions
-
-| Action | Description |
-|--------|-------------|
-| Enable HTTP Filesystem | Start the HTTP filesystem server |
-| Disable HTTP Filesystem | Stop the HTTP filesystem server |
-| rclone Config | Display the rclone configuration |
-
-## Quick Start
-
-### 1. Install the Plugin
-
-1. Download the plugin ZIP from the Dispatcharr Plugin Repository
-2. Extract to `/data/plugins/vodfs/`
-3. Enable the plugin in Dispatcharr Settings -> Plugins
-
-### 2. Configure
-
-1. Set the **HTTP Port** (default: 8888)
-2. Enable **Auto-hydrate Empty Series** (default: enabled)
-3. Set **Dispatcharr Base URL** to match your setup:
-   - **Same host**: `http://127.0.0.1:9191`
-   - **Docker container**: `http://<container_ip>:9191` (find IP with `docker inspect <container>`)
-   - **Remote host**: `http://<dispatcharr_host>:9191`
-4. Click **Enable HTTP Filesystem**
-
-### 3. Mount with rclone
-
-Add this to your `rclone.conf`:
-
-```ini
-[vodfs]
-type = http
-url = http://127.0.0.1:8888/
-```
-
-> **Note**: If Dispatcharr runs in Docker, use the container IP instead of `127.0.0.1`:
-> ```ini
-> [vodfs]
-> type = http
-> url = http://172.19.0.2:8888/
-> ```
-
-> **Authentication**: If you enabled "Enable Authentication (Token-based)" in plugin settings, add your API key:
-> ```ini
-> [vodfs]
-> type = http
-> url = http://127.0.0.1:8888/
-> headers = Authorization, ApiKey YOUR_DISPATCHARR_API_KEY_HERE
-> ```
-
-Mount the filesystem:
-
-```bash
-rclone mount vodfs: /path/to/mount --allow-other --vfs-cache-mode full --daemon
-```
-
-### 4. Add to Plex
-
-In Plex Media Server:
-1. Add a new library
-2. Select "Movies" or "TV Shows"
-3. Point to the mount path (e.g., `/tmp/vodfs/Movies` or `/tmp/vodfs/Series`)
-4. Scan the library
-
-## Filesystem Structure
-
-The filesystem mirrors Dispatcharr's VOD category model:
-
-```
-/Movies
+```text
+/mnt/vodfs
+  /Movies
     /All
-        Movie Name (2024).mkv
-        Movie Name (2024) - Provider2-streamid.mkv  # Multiple streams
-        Another Movie (2023).mkv
+      Example Movie (2024) - STRONG-12345.mkv
+      Example Movie (2024) - MEGA-67890.mkv
+    /[EN] NEW RELEASES
+      Example Movie (2024) - STRONG-12345.mkv
 
-    /[MULTI-LANG] TOP 2026 MOVIES
-        Movie Name (2024).mkv
-
-    /Action
-        Another Movie (2023).mkv
-
-    /Comedy
-        Comedy Movie (2021).mkv
-
-/Series
+  /Series
     /All
-        Show Name (2023)
-            /S01
-                S01E01 - Episode Title - Provider.mkv
-                S01E02 - Episode Title 2 - Provider.mkv
-
-    /Drama
-        Show Name (2023)
-            /S01
-                S01E01 - Episode Title - Provider.mkv
+      Example Show (2024)
+        /S01
+          S01E01 - Pilot - STRONG-11111.mkv
+          S01E02 - Next Episode - STRONG-11112.mkv
+    /APPLE+ SERIES
+      Example Show (2024)
+        /S01
+          S01E01 - Pilot - STRONG-11111.mkv
 ```
 
-**Key Points:**
-- `/Movies/All` contains every movie
-- `/Series/All` contains every series
-- Category directories are **siblings** of `All`, not children
-- Categories are derived from Dispatcharr's `vod_vodcategory` table (not hardcoded)
-- Multiple streams for the same title appear as separate files
-- Episodes are organized by season and episode number
-
-## Filename Convention
-
-When multiple providers offer the same title:
-
-```
-{Title} ({Year}) - {ProviderShortName}-{StreamID}.{ext}
-```
-
-Example:
-```
-Inception (2010) - xtream-12345.mkv
-Inception (2010) - iptv-org-67890.mkv
-```
-
-## Streaming
-
-All media playback is handled by Dispatcharr's proxy:
-
-- Files return **HTTP 302 redirect** to proxy URLs
-- Proxy URL format:
-  - Movies: `http://<dispatcharr_base>/proxy/vod/movie/{uuid}?stream_id={stream_id}`
-  - Episodes: `http://<dispatcharr_base>/proxy/vod/episode/{uuid}?stream_id={stream_id}`
-- No data flows through this plugin - it's a redirector only
-- Dispatcharr proxy handles authentication and streaming from M3U providers
-
-## Hydration Behavior
-
-### Startup Hydration
-- Server starts immediately (uvicorn binds to port)
-- All zero-episode series queued immediately on startup
-- 5 concurrent hydration workers process series
-- Directory listings available before hydration completes
-- Hydrated entries appear progressively
-
-### Episode Hydration Strategy
-Aggressive hydration with intelligent backoff:
-
-1. **Immediate Queue**: All zero-episode series queued on startup
-2. **Concurrent Workers**: 5 workers process series in parallel
-3. **Per-Series Backoff**: Exponential backoff on failure (1s → 2s → 4s → ... → max 5 min)
-4. **Global Circuit Breaker**: Reduces concurrency when 8+ failures/min detected
-5. **No Cooldown on Success**: Series that hydrate successfully are not retried
-6. **DB Storage**: Episodes stored in Dispatcharr DB, queried lazily on access
-
-## File Sizes
-
-- **Movies**: Estimated from `duration_secs` if available, otherwise defaults to 100 min (~1.4 GB at 2 Mbps)
-- **Episodes**: Estimated from `duration_secs * 250 KB/s`
-- Note: Most Xtream providers don't return file sizes in the standard API
+`All` is a sibling of your categories. It is not a parent folder. This makes Plex setup simple: point movie libraries at `/Movies/All` and TV libraries at `/Series/All`.
 
 ## Requirements
 
-- Dispatcharr v0.20.0 or later
-- Python 3.10+
-- rclone (for mounting)
-- Active M3U provider(s) configured in Dispatcharr
+- Dispatcharr with VOD content already loaded.
+- One or more enabled VOD categories in Dispatcharr.
+- rclone installed on the machine that will mount the filesystem.
+- Plex, Jellyfin, Emby, or another client that can read from the mounted folder.
 
-## Security & Access Control
+## Install
 
-**vodfs is a lightweight plugin that re-uses Dispatcharr's existing security model 100%.**  
-It creates **no new users, passwords, tokens, or credential storage** — everything is inherited directly from Dispatcharr.
+1. Install the plugin in Dispatcharr.
+2. Open Dispatcharr settings for the VODFS plugin.
+3. Choose an HTTP port. The default is `8888`.
+4. Set the Dispatcharr Base URL if needed.
+5. Click **Enable HTTP Filesystem**.
 
-### 1. Network Access (automatic)
-vodfs automatically respects your existing **Dispatcharr → Settings → Network Access → Stream Endpoints** rules.  
-If you have restricted streaming to your LAN or specific IP/CIDR ranges, vodfs enforces exactly the same limits with zero extra configuration.
+For most local installs, the default settings are enough.
 
-### 2. Authentication (optional, token-based)
-- Authentication is **turned OFF by default**.  
-  This makes initial testing and troubleshooting extremely simple — just open the filesystem URL in your browser and browse your entire library instantly.
-- When you are ready for production, enable **"Enable Authentication (Token-based)"** in the plugin settings.
-- It uses your **existing Dispatcharr API key** (the same one already shown in your user profile). No new secrets to manage.
+## Get Your rclone Config
 
-**rclone configuration when authentication is enabled:**
+After enabling the plugin, open this URL in your browser:
+
+```text
+http://<vodfs-host>:8888/rclone_conf
+```
+
+Examples:
+
+```text
+http://127.0.0.1:8888/rclone_conf
+http://192.168.1.21:8888/rclone_conf
+http://172.19.0.2:8888/rclone_conf
+```
+
+The page returns plain text you can copy directly into your `rclone.conf`. It includes:
+
+- the `[vodfs]` remote block
+- a suggested mount point
+- the mount command
+- Plex movie and series paths
+- the optional API key header for secured installs
+
+Example output:
+
+```ini
+# VODFS rclone remote
+# Paste the [vodfs] block into your rclone.conf file.
+# Suggested mount point: /mnt/vodfs
+# Mount command:
+#   mkdir -p /mnt/vodfs
+#   rclone mount vodfs: /mnt/vodfs --allow-other --vfs-cache-mode off --dir-cache-time 5s --poll-interval 0
+# Plex library paths:
+#   Movies: /mnt/vodfs/Movies/All
+#   Series: /mnt/vodfs/Series/All
+# Secured installs: enable plugin auth, then uncomment the headers line and replace the placeholder.
+
+[vodfs]
+type = http
+url = http://192.168.1.21:8888/
+# headers = Authorization, ApiKey <your-dispatcharr-api-key>
+```
+
+## Mount With rclone
+
+Create your mount point:
+
+```bash
+sudo mkdir -p /mnt/vodfs
+```
+
+Mount VODFS:
+
+```bash
+rclone mount vodfs: /mnt/vodfs --allow-other --vfs-cache-mode off --dir-cache-time 5s --poll-interval 0
+```
+
+For a background mount, add `--daemon`:
+
+```bash
+rclone mount vodfs: /mnt/vodfs --allow-other --vfs-cache-mode off --dir-cache-time 5s --poll-interval 0 --daemon
+```
+
+Quick check:
+
+```bash
+ls /mnt/vodfs
+ls /mnt/vodfs/Movies/All
+ls /mnt/vodfs/Series/All
+```
+
+## Add to Plex
+
+In Plex Media Server:
+
+1. Add a movie library.
+2. Use this folder:
+
+```text
+/mnt/vodfs/Movies/All
+```
+
+3. Add a TV library.
+4. Use this folder:
+
+```text
+/mnt/vodfs/Series/All
+```
+
+5. Scan the libraries.
+
+You can also point Plex at category folders if you want smaller libraries, for example:
+
+```text
+/mnt/vodfs/Movies/[EN] NEW RELEASES
+/mnt/vodfs/Series/APPLE+ SERIES
+```
+
+## Secured Installs
+
+VODFS can require a Dispatcharr API key. Enable **Authentication (Token-based)** in the plugin settings.
+
+Then use this in your rclone config:
+
 ```ini
 [vodfs]
 type = http
-url = http://your-dispatcharr-host:8888/
-headers = Authorization, ApiKey YOUR_DISPATCHARR_API_KEY_HERE
-# Alternative header (also supported):
-# headers = X-API-Key, YOUR_DISPATCHARR_API_KEY_HERE
+url = http://192.168.1.21:8888/
+headers = Authorization, ApiKey <your-dispatcharr-api-key>
 ```
 
-### 3. Logging & Credential Exposure
-- **The vodfs plugin itself never logs any credentials** — not in its own logs, not in uvicorn access logs, and not even at debug level.
-- Playback flow (what actually happens):
-  1. vodfs returns a simple `302` redirect to Dispatcharr's internal proxy URL (`/proxy/vod/...`). This URL contains **only** a UUID and stream ID — **no** username or password.
-  2. Dispatcharr then **streams the video bytes server-side** using `StreamingHttpResponse`.
-- **Key security benefit**: rclone and any media player **never receive or see the real IPTV provider URL** that contains your `username` and `password`. Those credentials stay entirely inside the Dispatcharr process and are never transmitted to the client.
+Use an active Dispatcharr API key. No new VODFS-specific password is created.
 
-The **only** place IPTV credentials may appear is inside **Dispatcharr's own VOD proxy logs** (at INFO level). This is standard Dispatcharr behavior and unrelated to vodfs.
+## How It Works
 
-### Summary
-This architecture gives you:
-- Full reuse of Dispatcharr's network rules and authentication
-- Zero credential leakage to rclone, players, or external logs
-- Lightweight operation (no unnecessary byte proxying through the plugin)
-- Easy debugging (leave auth off while testing)
+At a high level:
 
-Once testing is complete, simply enable authentication in the plugin settings and vodfs becomes fully protected by the same security model Dispatcharr already provides.
+1. rclone asks VODFS for a folder listing.
+2. VODFS queries Dispatcharr's database for the currently enabled VOD categories and content.
+3. VODFS returns a normal HTML directory listing that rclone understands.
+4. When a player opens a file, VODFS returns an HTTP `302` redirect to Dispatcharr's VOD proxy.
+5. Dispatcharr streams the media from the provider.
+
+VODFS does not proxy video bytes itself. That keeps the plugin lightweight and lets Dispatcharr handle the actual streaming path.
 
 ## Troubleshooting
 
-### Server won't start
+### The rclone config page does not open
 
-- Check port is not in use: `netstat -tlnp | grep 8888`
-- Check Dispatcharr logs for errors
-- Verify `/data/plugins/vodfs/` is writable
-- Check server logs: `/data/plugins/vodfs/plugin/server.log`
+Check that the plugin server is running:
 
-### Can't mount with rclone
-
-- Verify server is running: `curl http://127.0.0.1:8888/`
-- Check firewall allows loopback connections
-- Verify rclone configuration matches the port
-- If using Docker, use container IP instead of `127.0.0.1`
-
-### Playback fails (s1001 Network error)
-
-- Verify `dispatcharr_base_url` setting is reachable from rclone/Plex
-- Check Dispatcharr proxy logs for streaming errors
-- Some M3U providers may return 403 for certain content
-- Test redirect chain: `curl -svL http://<server>:8888/Movies/All/<movie>.mkv`
-
-### Plex scan finds no content
-
-- Verify mount path is correct in Plex settings
-- Check `/Movies/All` and `/Series/All` are browsable
-- Verify Dispatcharr has VOD content loaded
-- Ensure rclone mount is active: `mount | grep vodfs`
-
-### Episodes not appearing
-
-- Verify `auto_hydrate_empty_series` is enabled
-- Check Dispatcharr logs for `refresh_series_episodes` tasks
-- Wait for hydration to complete (background task)
-- Browse the Series directory again
-
-### Large library slow to browse
-
-- This is expected for libraries with 1000+ items
-- Directory listings are cached per session
-- Consider category filtering instead of "All" view
-
-## Development
-
-See `architecture/OVERVIEW.md` and `CONTRIBUTING.md` for development details.
-
-### Project Structure
-
-```
-vodfs/
-├── plugin.py              # Plugin control plane (enable/disable)
-├── plugin.json            # Plugin manifest
-├── plugin/
-│   ├── server.py          # FastAPI/uvicorn server entry point
-│   ├── tree.py            # Virtual filesystem tree with lazy path resolution
-│   ├── httpfs.py          # HTTP request handlers with lazy queries + cache
-│   ├── integration.py     # Dispatcharr VOD integration + watermark queries
-│   ├── manifest.py        # Atomic manifest management (load/save/rebuild)
-│   ├── cache.py           # LRU cache for directory listings (5000 entries)
-│   ├── hydration.py       # Aggressive hydration scheduler with backoff
-│   ├── standalone_runner.py  # Child process bootstrap
-│   └── celery_worker.py   # Background task definitions
-├── architecture/
-│   ├── OVERVIEW.md        # System architecture
-│   ├── HTTPFS.md          # HTTP protocol design
-│   └── HYDRATION.md       # Episode hydration strategy
-├── tests/                 # Unit and integration tests
-├── scripts/               # Helper scripts
-├── .ai/                   # Sprint planning and task tracking
-└── docs/                  # Additional documentation
+```bash
+curl http://127.0.0.1:8888/healthz
 ```
 
-## Sprint History
+If Dispatcharr runs in Docker, use the container IP or host-mapped address instead of `127.0.0.1`.
 
-| Sprint | Description | Status |
-|--------|-------------|--------|
-| 100 | Project Setup | Complete |
-| 101 | GitHub Repository Setup | Complete |
-| 102 | Basic HTTP Server | Complete |
-| 103 | Virtual Filesystem Tree | Complete |
-| 104 | Dispatcharr Integration | Complete |
-| 105 | HTTP 302 Redirects | Complete |
-| 106 | Celery Background Tasks | Complete |
-| 107 | Series Episode Hydration | Complete |
-| 109 | Multi-Stream File Handling | Complete |
-| 110 | Large Library Performance | Complete |
-| 111 | Error Handling and Logging | Complete |
-| 112 | Documentation Polish | Complete |
-| 113 | File Sizes + Real Categories | Complete |
-| 114 | Proxy URLs & Playback Fix | Complete |
+### rclone mounts, but folders are empty
+
+Check these in Dispatcharr:
+
+- VOD content exists.
+- VOD categories are enabled.
+- The provider/account for that content is enabled.
+
+Then try:
+
+```bash
+curl http://127.0.0.1:8888/Movies/
+curl http://127.0.0.1:8888/Series/
+```
+
+### Plex sees movies but playback fails
+
+Make sure the **Dispatcharr Base URL** plugin setting is reachable from the machine running Plex/rclone. Playback redirects go to Dispatcharr's proxy, not directly to the IPTV provider.
+
+### Plex scans too slowly
+
+Start with `/Movies/All` and `/Series/All`. If the library is very large, consider adding category-specific libraries so Plex scans smaller folders.
+
+### Stop the mount
+
+```bash
+fusermount -u /mnt/vodfs
+```
+
+## More Detail
+
+- Architecture: [`architecture/OVERVIEW.md`](architecture/OVERVIEW.md)
+- HTTP behavior: [`architecture/HTTPFS.md`](architecture/HTTPFS.md)
+- Troubleshooting notes: [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
 
 ## License
 
-MIT License - see `LICENSE` file.
-
-## Credits
-
-Based on the [xtream-vodfs](https://github.com/OneHotTake/xtream-vodfs) proof of concept.
-
-## Support
-
-- Issues: [GitHub Issues](https://github.com/OneHotTake/dispatcharr-vodfs/issues)
-- Discord: [Dispatcharr Discord](https://discord.gg/dispatcharr)
+MIT License.

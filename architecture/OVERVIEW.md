@@ -1,310 +1,226 @@
-# System Overview
+# VODFS Architecture
 
-The VOD HTTP Filesystem Plugin exposes Dispatcharr's VOD library as a mountable HTTP filesystem for use with rclone and media servers like Plex.
+This document describes the current VODFS runtime architecture. The short version: Dispatcharr remains the source of truth, and VODFS exposes a lightweight HTTP filesystem view over live Dispatcharr ORM queries.
 
-## High-Level Architecture
+## Design Goals
 
-```
-+-----------------+
-|   Dispatcharr   |
-|  (Main Process) |
-+--------+--------+
-         |
-         | Plugin Interface
-         | (run/stop hooks)
-         |
-+--------v--------+
-|  VODFS Plugin   |  <-- Control Plane
-|   (plugin.py)   |      - Starts child process
-|                 |      - Manages lifecycle
-|                 |      - Exposes UI
-+--------+--------+
-         |
-         | subprocess
-         |
-+--------v----------------------------------+
-|  Child HTTP Process (FastAPI Server) |  <-- Service Plane
-|                                        |      - Serves HTTP
-|  +--------------------------------+   |      - Handles requests
-|  |  Virtual Tree (tree.py)        |   |      - 302 redirects
-|  |  - Movies/Series structure     |   |
-|  |  - All + categories            |   |
-|  +--------------------------------+   |
-|  +--------------------------------+   |
-|  |  HTTP Handlers (httpfs.py)     |   |
-|  |  - GET/HEAD requests           |   |
-|  |  - Directory listings          |   |
-|  |  - 302 redirects               |   |
-|  +--------------------------------+   |
-|  +--------------------------------+   |
-|  |  Integration (integration.py)  |   |
-|  |  - Django models               |   |
-|  |  - VOD content fetch           |   |
-|  |  - Episode hydration           |   |
-|  +--------------------------------+   |
-+-----------------------------------------+
-         |
-         | HTTP 302 Redirect
-         |
-+--------v--------+
-|  Dispatcharr    |
-|     Proxy       |
-|  (Streaming)    |
-+-----------------+
+- Do not maintain a separate VOD manifest.
+- Do not copy or proxy media bytes through VODFS.
+- Respect Dispatcharr's enabled VOD category/account state.
+- Keep rclone and Plex browsing responsive enough for large libraries.
+- Keep the plugin simple to operate and easy to debug.
+
+## Runtime Shape
+
+```text
+Dispatcharr main process
+  |
+  | plugin run/stop actions
+  v
+plugin.py
+  - reads plugin settings
+  - starts/stops child process
+  - writes PID file
+  |
+  | subprocess
+  v
+standalone_runner.py
+  - initializes Django
+  - starts FastAPI server
+  |
+  v
+server.py / httpfs.py / tree.py / integration.py
+  - serves directory listings
+  - runs live Django ORM queries
+  - returns 302 redirects to Dispatcharr proxy URLs
 ```
 
-## Components
+The child server binds to the configured HTTP port and is intended to be reached by rclone. In Docker deployments, this usually means using the container IP or a mapped host port.
 
-### 1. Plugin Control Plane (`plugin.py`)
+## Important Files
 
-**Purpose**: Manage plugin lifecycle within Dispatcharr.
+| File | Responsibility |
+|------|----------------|
+| `plugin.py` | Dispatcharr plugin entry point. Starts and stops the child HTTP process. Generates rclone config action output. |
+| `plugin/standalone_runner.py` | Child process bootstrap. Calls `django.setup()` before starting the server. |
+| `plugin/server.py` | FastAPI app, health endpoints, `/rclone_conf`, auth/network dependency checks, uvicorn startup. |
+| `plugin/httpfs.py` | HTTP filesystem request handling, directory listing rendering, rclone-compatible HTML, file redirects. |
+| `plugin/tree.py` | Virtual path resolution and live DB-backed movie/series/episode lookup. |
+| `plugin/integration.py` | Dispatcharr model integration and episode stream relation grouping. |
+| `plugin/cache.py` | Small in-memory TTL/LRU cache for directory listing responses. |
 
-**Responsibilities**:
-- Implement `Plugin.run()` for action handling
-- Implement `Plugin.stop()` for graceful shutdown
-- Start/stop child HTTP process
-- Manage PID file persistence
-- Provide rclone configuration
-- Pass `VODFS_DISPATCHARR_BASE_URL` to child process
+## Filesystem Layout
 
-**Key Methods**:
-- `run(action, params, context)` - Handle enable/disable/config actions
-- `stop(context)` - Called on disable/delete/reload
-- `_enable(logger, settings)` - Start child process
-- `_disable(logger)` - Stop child process
+VODFS intentionally exposes a simple two-root structure:
 
-### 2. Virtual Filesystem Tree (`tree.py`)
+```text
+/Movies
+  /All
+  /<enabled movie category>
 
-**Purpose**: Build and maintain the virtual directory structure with lazy path resolution.
-
-**Responsibilities**:
-- Represent filesystem as a tree of `FSNode` objects
-- Build Movies structure (All + real categories from manifest)
-- Build Series structure (All + real categories from manifest)
-- Resolve paths using manifest + targeted DB queries (lazy resolution)
-- Support directory and file node types
-- Query movies/series/seasons from DB on demand
-
-**Key Classes**:
-- `FSNode` - Base node class
-- `DirectoryNode` - Directory with children
-- `FileNode` - File with stream URL and size
-- `VirtualTree` - Tree builder and lazy resolver
-
-**Key Methods**:
-- `resolve_path_with_db(path)` - Lazy path resolution with manifest + DB
-- `get_movies_from_db(category)` - Lazy movie query
-- `get_series_from_db(category)` - Lazy series query from manifest
-- `get_seasons_from_db(series_uuid)` - Lazy episode query grouped by season
-
-### 3. HTTP Handlers (`httpfs.py`)
-
-**Purpose**: Handle HTTP requests for the filesystem with lazy queries and caching.
-
-**Responsibilities**:
-- Serve directory listings (GET) with lazy DB queries
-- Handle HEAD requests (metadata)
-- Return 302 redirects to Dispatcharr proxy (GET on files)
-- Generate HTML directory listings
-- Handle trailing slash redirects
-- Cache directory listings (LRU, 5000 entries, 600s TTL)
-- Route series paths to appropriate handlers (seasons vs episodes)
-
-**Key Methods**:
-- `handle_get(path, request)` - GET request handler
-- `handle_head(path, request)` - HEAD request handler
-- `serve_directory(node, path)` - Directory listing with lazy queries + cache
-- `serve_file(node)` - 302 redirect to stream URL
-- `_get_movies_listing(category)` - Lazy movie query
-- `_get_series_listing(category)` - Lazy series query from manifest
-- `_get_seasons_listing(series_name)` - Lists season directories
-- `_get_episodes_listing(series_name, season_name)` - Lists episode files
-- `_extract_series_uuid(series_name)` - Manifest-based series UUID lookup
-
-### 4. Dispatcharr Integration (`integration.py`)
-
-**Purpose**: Bridge to Dispatcharr's VOD models and tasks.
-
-**Responsibilities**:
-- Fetch movies from `apps.vod.models.Movie`
-- Fetch series and episodes
-- Fetch real categories from `VODCategory`
-- Trigger `refresh_series_episodes` task
-- Generate Dispatcharr proxy URLs with configurable base URL
-- Handle hydration cooldowns
-- Estimate file sizes from duration
-
-**Key Classes**:
-- `DispatcharrIntegrator` - Main integration class
-- `_get_dispatcharr_base_url()` - Helper for proxy URL generation
-
-### 5. HTTP Server (`server.py`)
-
-**Purpose**: FastAPI/uvicorn server entry point.
-
-**Responsibilities**:
-- Create FastAPI application
-- Build virtual tree
-- Start hydration in background thread
-- Run uvicorn server
-
-**Key Functions**:
-- `create_app(tree)` - Create FastAPI app
-- `_hydrate_background(tree)` - Background hydration thread
-- `run_server(port)` - Start uvicorn
-
-### 6. Standalone Runner (`standalone_runner.py`)
-
-**Purpose**: Child process bootstrap with Django initialization.
-
-**Responsibilities**:
-- Initialize Django (`django.setup()`)
-- Add plugin directory to Python path
-- Start HTTP server
-
-## Data Flow
-
-### Startup Flow
-
-```
-1. User clicks "Enable HTTP Filesystem"
-2. Dispatcharr calls Plugin.run("enable", ...)
-3. Plugin validates settings (port, auto_hydrate, dispatcharr_base_url)
-4. Plugin starts child HTTP process (subprocess.Popen)
-5. Plugin saves PID to /data/plugins/vodfs/server.pid
-6. Child process initializes:
-   a. Connects to Django (same process)
-   b. Builds virtual tree
-   c. Starts FastAPI server on 0.0.0.0:port
-   d. Background thread hydrates tree from Dispatcharr models
-7. Plugin returns success to UI
+/Series
+  /All
+  /<enabled series category>
 ```
 
-### Directory Listing Flow
+`All` is a sibling of category directories. It is not a parent directory.
 
-```
-1. rclone or Plex requests GET /Movies/All/
-2. HTTP handler receives request
-3. Tree resolves path to DirectoryNode
-4. HTTP handler generates HTML listing
-5. Returns HTML with links to children
-6. rclone/Plex parses HTML and lists entries
+Movie files use this format:
+
+```text
+{Movie Title} ({Year}) - {ProviderShortName}-{StreamID}.{ext}
 ```
 
-### File Playback Flow
+Episode files use this format:
 
-```
-1. Plex requests HEAD /Movies/All/Inception (2010).mkv
-2. HTTP handler resolves path to FileNode
-3. HTTP handler returns metadata (size, content-type)
-4. Plex requests GET /Movies/All/Inception (2010).mkv
-5. HTTP handler returns 302 redirect to Dispatcharr proxy:
-   http://<dispatcharr_base>/proxy/vod/movie/{uuid}?stream_id={id}
-6. Plex follows redirect to Dispatcharr proxy
-7. Dispatcharr proxy streams video from upstream M3U provider
-8. Plex plays video
+```text
+S01E01 - {Episode Name} - {ProviderShortName}-{StreamID}.{ext}
 ```
 
-### Episode Hydration Flow
+The stream ID is part of the filename so direct file resolution remains deterministic after restart and across providers.
 
+## Directory Listing Flow
+
+```text
+rclone GET /Movies/All/
+  -> server.py routes to HTTPFilesystem
+  -> tree.py resolves /Movies/All as a directory
+  -> httpfs.py asks tree.py for movies from DB
+  -> tree.py queries enabled M3UMovieRelation rows
+  -> httpfs.py renders a simple HTML index
+  -> rclone parses links as files/folders
 ```
-1. User browses /Series/All/Show Name/
-2. HTTP handler detects zero episodes
-3. Integration checks hydration cooldown
-4. If not in cooldown, enqueue refresh_series_episodes task
-5. Task runs in background (Celery)
-6. Episodes fetched from provider
-7. Next browse shows episodes
+
+Series flow is similar, with one extra level:
+
+```text
+/Series/All/Show Name/
+  -> season directories
+
+/Series/All/Show Name/S01/
+  -> episode files
 ```
 
-## Design Decisions
+## File Playback Flow
 
-### Why Separate Child Process?
+```text
+Plex/rclone GET /Movies/All/Movie (2024) - STRONG-12345.mkv
+  -> tree.py parses the filename and stream ID
+  -> tree.py verifies the relation is enabled in Dispatcharr
+  -> httpfs.py returns 302 Location: http://dispatcharr/proxy/vod/movie/{uuid}?stream_id=12345
+  -> client follows redirect to Dispatcharr
+  -> Dispatcharr streams the media
+```
 
-**Reason**: Dispatcharr plugins run in the main Django process. Long-running HTTP servers would block the main thread.
+Episodes work the same way, using Dispatcharr's episode proxy endpoint:
 
-**Approach**: Use subprocess to run a separate FastAPI server.
+```text
+http://dispatcharr/proxy/vod/episode/{uuid}?stream_id={stream_id}
+```
 
-**Trade-offs**:
-- Non-blocking to Dispatcharr
-- Can use async I/O
-- Process isolation
-- Need PID management
-- Slightly more complex deployment
+## Live DB Queries
 
-### Why HTTP 302 Redirects?
+VODFS does not use a manifest file or snapshot. Every listing is derived from Dispatcharr database state.
 
-**Reason**: Avoid proxying video data through this plugin.
+The core enabled-content rule is:
 
-**Approach**: Redirect all playback to Dispatcharr's proxy.
+```text
+M3UVODCategoryRelation.enabled = True
+and relation.m3u_account matches the content relation's m3u_account
+```
 
-**Trade-offs**:
-- Leverages Dispatcharr's optimized proxy
-- No data flow through plugin
-- Supports authentication automatically
-- Requires Dispatcharr proxy infrastructure
+That same-account check matters because enabled category state is account-specific.
 
-### Why Background Hydration?
+Movie listing uses `M3UMovieRelation` and joins through category/account relations.
 
-**Reason**: Library hydration can take minutes for large libraries. Server should start immediately.
+Series listing uses `M3USeriesRelation` and joins through category/account relations.
 
-**Approach**: Start uvicorn first, hydrate tree in background daemon thread.
+Episode listing bulk-fetches `M3UEpisodeRelation` rows for the series and groups them by episode to avoid one query per episode.
 
-**Trade-offs**:
-- Server responds immediately
-- Directory listings available before hydration completes
-- Hydrated entries appear progressively
-- Tree is eventually consistent
+## Directory Cache
 
-### Why Virtual Tree?
+`plugin/cache.py` provides a small in-memory TTL/LRU cache for rendered directory entries:
 
-**Reason**: Need to represent Dispatcharr's VOD structure as a filesystem.
+- max entries: 5000
+- TTL: 600 seconds
 
-**Approach**: Build an in-memory tree of directory/file nodes.
+This is a performance cache only. It is not a source of truth. If Dispatcharr content changes, VODFS will naturally refresh after cache expiry or process restart.
 
-**Trade-offs**:
-- Simple and flexible
-- Fast path resolution
-- Easy to test
-- In-memory (rebuild on restart)
-- No caching across restarts
+## `/rclone_conf`
 
-### Why "All" + Categories Structure?
+The hidden helper endpoint:
 
-**Reason**: Mirrors Dispatcharr's VOD browsing model and user expectations.
+```text
+GET /rclone_conf
+```
 
-**Approach**: "All" is a sibling to categories, not a parent. Categories derived from `vod_vodcategory` table.
+returns `text/plain` containing:
 
-**Trade-offs**:
-- Matches Dispatcharr UI
-- Easy to browse everything or filtered
-- No duplication in All view
-- Slightly more complex tree building
+- an rclone remote block
+- suggested mount point
+- mount command
+- Plex library paths
+- API key header guidance
 
-## Security Considerations
+It uses the incoming request host for the `url =` line, which makes it useful whether the user opens it through localhost, LAN IP, or Docker container IP.
 
-1. **Localhost Only**: HTTP server binds to `127.0.0.1` (or container IP via Docker port mapping)
-2. **No Credential Exposure**: Never log M3U credentials
-3. **Path Traversal Prevention**: Validate all input paths
-4. **Input Validation**: Validate all settings and params
-5. **Secrets Management**: Credentials stored in `.env.secrets` (gitignored)
+## Child Process Lifecycle
 
-## Performance Considerations
+Enable action:
 
-1. **Background Hydration**: Server starts immediately, hydration runs in background
-2. **Lazy Loading**: Don't fetch all episodes upfront
-3. **Bounded Concurrency**: Limit hydration concurrency
-4. **Cooldown Timers**: Prevent spam hydration
-5. **Dict-based Child Lookup**: O(1) path resolution
+```text
+Dispatcharr -> plugin.py -> subprocess.Popen(standalone_runner.py --port <port>)
+```
 
-## Future Enhancements
+The child process:
 
-- [ ] WebDAV support for native clients
-- [ ] Caching across restarts
-- [ ] Directory listing caching
-- [ ] Rate limiting per IP
-- [ ] Scanner detection (Plex/Emby/Jellyfin)
-- [ ] Rich metadata enrichment
-- [ ] Search endpoint
-- [ ] Progress indicators for hydration
-- [ ] Multi-provider fallback in Dispatcharr proxy
+1. initializes Django
+2. builds the basic virtual tree roots
+3. starts FastAPI/uvicorn
+4. serves live DB-backed filesystem requests
+
+Disable/stop action:
+
+```text
+plugin.py reads PID -> sends SIGTERM -> removes PID file
+```
+
+The FastAPI lifespan handler shuts down the thread pool used for synchronous ORM work.
+
+## Threading Model
+
+FastAPI handlers are async, but Django ORM calls are synchronous. VODFS uses a small `ThreadPoolExecutor` in `httpfs.py` to run DB-backed operations outside the async event loop.
+
+This avoids Django `SynchronousOnlyOperation` errors while keeping request handling responsive.
+
+## Security Model
+
+VODFS is an internal Dispatcharr plugin and inherits Dispatcharr's deployment/security assumptions.
+
+Runtime behavior:
+
+- VODFS never exposes upstream IPTV provider URLs.
+- Media file GET requests return Dispatcharr proxy redirects.
+- Optional API-key auth uses Dispatcharr API keys.
+- Network checks call Dispatcharr's stream network-access policy when available.
+
+The server binds to the configured interface/port so rclone can reach it. Secure the Dispatcharr environment and network as you normally would.
+
+## Removed Legacy Architecture
+
+Older versions experimented with manifest snapshots, hydration queues, watermark polling, and Celery-side plugin tasks. Those pieces are intentionally gone.
+
+Current behavior is live-query only:
+
+```text
+request -> Dispatcharr ORM -> directory listing or 302 redirect
+```
+
+This keeps the plugin smaller and avoids a second library state that can drift from Dispatcharr.
+
+## Operational Notes
+
+- The plugin is easiest to debug by opening `/Movies/`, `/Series/`, and `/rclone_conf` in a browser.
+- Direct file URLs should return `302`, not video bytes.
+- If a direct episode or movie request happens after restart, filename parsing plus DB lookup should resolve it without requiring the parent directory to be listed first.
+- Large `All` directories are expected to be heavier than category directories.

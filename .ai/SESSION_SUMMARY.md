@@ -30,3 +30,13 @@
 ### Verification
 - `/rclone_conf` returns copy/paste-ready text with request host in the `url =` line.
 - VODFS child server restarted and endpoint verified after Dispatcharr container restart.
+
+## Session: User-Focused Documentation Rewrite
+
+### Changes Made
+1. **README.md**: Rewritten as a user-facing guide focused on what VODFS does, how to get `/rclone_conf`, how to mount with rclone, and how to add Plex libraries.
+2. **architecture/OVERVIEW.md**: Rewritten with current live-DB architecture, request flows, direct file resolution, `/rclone_conf`, cache behavior, and removed legacy manifest/hydration design details.
+
+### Verification
+- Checked README for stale manifest/hydration references.
+- Architecture doc only mentions legacy manifest/hydration as intentionally removed.
