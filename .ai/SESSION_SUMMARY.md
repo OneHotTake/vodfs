@@ -48,3 +48,25 @@
 
 ### Verification
 - Deployed to the running container and verified `/fortune` returns a text fortune.
+
+## Session: Plugin Settings Smoke Test + User Docs
+
+### Changes Made
+1. **plugin.json**: Removed stale `enabled` setting. Dispatcharr already controls plugin enablement and VODFS did not read this field.
+2. **README.md**: Added rclone download link, FUSE dependency notes, Plex-host requirement, Docker/Plex mount visibility warning, and API key location steps.
+
+### Verification
+- Verified plugin manifest exposes only active settings: `http_port`, `dispatcharr_base_url`, `enable_auth`.
+- Tested all actions through Dispatcharr `PluginManager`: `show_rclone_config`, `enable`, `disable`.
+- Verified `http_port` by starting on test port `18888`.
+- Verified `dispatcharr_base_url` by checking movie redirect location uses custom base URL.
+- Verified `enable_auth` by requiring API key for `/rclone_conf`, then succeeding with a real Dispatcharr API key.
+- Restored original settings and restarted VODFS on port `8888`.
+
+## Session: More Mostly Harmless Fortunes
+
+### Changes Made
+1. **plugin/server.py**: Expanded `/fortune` responses with absurdist VODFS/rclone/Plex fortunes inspired by space-guide energy.
+
+### Verification
+- Deployed updated server file and sampled `/fortune` successfully.

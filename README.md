@@ -45,8 +45,37 @@ After mounting, the filesystem looks like this:
 
 - Dispatcharr with VOD content already loaded.
 - One or more enabled VOD categories in Dispatcharr.
-- rclone installed on the machine that will mount the filesystem.
-- Plex, Jellyfin, Emby, or another client that can read from the mounted folder.
+- [rclone](https://rclone.org/downloads/) installed on the machine that will mount the filesystem.
+- FUSE support on that same machine so rclone can create a real mounted folder.
+- Plex, Jellyfin, Emby, or another client that can read from that mounted folder.
+
+Important: rclone must run on the same host that Plex reads media from.
+
+For a typical Plex setup, that means:
+
+```text
+Dispatcharr/VODFS server  --->  rclone mount on Plex host  --->  Plex library path
+```
+
+If Plex is running in Docker, the rclone mount must be visible inside the Plex container. Usually that means mounting VODFS on the Docker host, then bind-mounting `/mnt/vodfs` into the Plex container.
+
+### FUSE Notes
+
+rclone mounts use FUSE. On Linux, make sure FUSE is installed and usable before continuing.
+
+Debian/Ubuntu examples:
+
+```bash
+sudo apt install rclone fuse3
+```
+
+If you use `--allow-other`, `/etc/fuse.conf` may need:
+
+```text
+user_allow_other
+```
+
+Without FUSE support, `rclone mount` will fail or Plex will not see the mounted filesystem.
 
 ## Install
 
@@ -104,6 +133,8 @@ url = http://192.168.1.21:8888/
 
 ## Mount With rclone
 
+Run these commands on the same machine that runs Plex, or on the host that provides Plex's media folders.
+
 Create your mount point:
 
 ```bash
@@ -160,6 +191,14 @@ You can also point Plex at category folders if you want smaller libraries, for e
 ## Secured Installs
 
 VODFS can require a Dispatcharr API key. Enable **Authentication (Token-based)** in the plugin settings.
+
+To find or create your Dispatcharr API key:
+
+1. Open Dispatcharr.
+2. Click your username/avatar in the lower-left sidebar.
+3. Open the **API & XC** tab.
+4. Click **Generate API Key** if one does not already exist.
+5. Click the copy icon next to **API Key**.
 
 Then use this in your rclone config:
 

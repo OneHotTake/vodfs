@@ -9,12 +9,6 @@
   "min_dispatcharr_version": "v0.20.0",
   "fields": [
     {
-      "id": "enabled",
-      "label": "Enabled",
-      "type": "boolean",
-      "default": false
-    },
-    {
       "id": "http_port",
       "label": "HTTP Port",
       "type": "number",
