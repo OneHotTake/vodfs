@@ -167,7 +167,8 @@ class VirtualTree:
                 existing = parent.find_child(filename)
                 if existing:
                     return existing
-            file_node = self._resolve_movie_by_filename(filename)
+            category = None if components[0] == "All" else components[0]
+            file_node = self._resolve_movie_by_filename(filename, category)
             if file_node:
                 if parent and isinstance(parent, DirectoryNode):
                     parent.add_child(file_node)
@@ -210,7 +211,6 @@ class VirtualTree:
                 if series_obj:
                     show_dir = parent.add_directory(show_name)
                     show_dir.metadata["series_uuid"] = str(series_obj.uuid)
-                    show_dir.metadata["hydrated"] = series_obj.episodes.exists()
 
             return show_dir
 
@@ -233,10 +233,17 @@ class VirtualTree:
             if not parent or not isinstance(parent, DirectoryNode):
                 return None
 
+            show_name = components[1]
+            season_name = components[2]
             filename = components[-1]
             existing = parent.find_child(filename)
             if existing:
                 return existing
+            category = components[0]
+            file_node = self._resolve_episode_by_filename(category, show_name, season_name, filename)
+            if file_node:
+                parent.add_child(file_node)
+                return file_node
             return None
 
         return None
@@ -290,36 +297,23 @@ class VirtualTree:
             return []
 
         try:
-            from apps.vod.models import Movie, M3UMovieRelation
+            from apps.vod.models import M3UMovieRelation
+            from django.db.models import F
         except ImportError:
             return []
 
         base_url = _get_dispatcharr_base_url()
 
-        queryset = Movie.objects.filter(
-            m3u_relations__category__m3u_relations__enabled=True
-        ).select_related('logo').distinct()
+        relations = M3UMovieRelation.objects.filter(
+            category__m3u_relations__enabled=True,
+            category__m3u_relations__m3u_account=F("m3u_account"),
+        ).select_related('movie', 'category', 'm3u_account').distinct()
 
         if category:
-            queryset = queryset.filter(
-                m3u_relations__category__name=category
-            ).distinct()
+            relations = relations.filter(category__name=category)
 
         result = []
-        movie_ids = list(queryset.values_list('id', flat=True))
-        relations = M3UMovieRelation.objects.filter(
-            movie_id__in=movie_ids
-        ).select_related('movie', 'category', 'm3u_account')
-
         for rel in relations:
-            if not rel.category or not rel.category.m3u_relations.filter(
-                m3u_account=rel.m3u_account, enabled=True
-            ).exists():
-                continue
-
-            if category and rel.category.name != category:
-                continue
-
             stream_url = f"{base_url}/proxy/vod/movie/{rel.movie.uuid}?stream_id={rel.stream_id}"
 
             provider_short = rel.m3u_account.name[:20] if rel.m3u_account else "Unknown"
@@ -339,63 +333,131 @@ class VirtualTree:
 
         return result
 
-    def _resolve_movie_by_filename(self, filename: str) -> Optional[FileNode]:
+    def _resolve_movie_by_filename(self, filename: str, category: Optional[str] = None) -> Optional[FileNode]:
         """Resolve a movie file by filename via DB lookup on stream_id"""
         try:
-            from apps.vod.models import Movie, M3UMovieRelation
+            from apps.vod.models import M3UMovieRelation
+            from django.db.models import F
         except ImportError:
             return None
-
-        try:
-            from integration import DispatcharrIntegrator
-        except ImportError:
-            from .integration import DispatcharrIntegrator
 
         parts = filename.rsplit('-', 1)
         if len(parts) < 2:
             return None
         stream_id = parts[-1].rsplit('.', 1)[0]
 
+        base_url = _get_dispatcharr_base_url()
+        integrator = DispatcharrIntegrator()
+        relations = M3UMovieRelation.objects.filter(
+            stream_id=stream_id,
+            category__m3u_relations__enabled=True,
+            category__m3u_relations__m3u_account=F("m3u_account"),
+        ).select_related('movie', 'm3u_account', 'category').distinct()
+        if category:
+            relations = relations.filter(category__name=category)
+
+        for rel in relations:
+            provider_short = rel.m3u_account.name[:20] if rel.m3u_account else "Unknown"
+            expected = integrator.build_filename(
+                rel.movie.name, rel.movie.year, provider_short,
+                rel.stream_id, rel.container_extension or "mkv"
+            )
+            if expected != filename:
+                continue
+
+            stream_url = f"{base_url}/proxy/vod/movie/{rel.movie.uuid}?stream_id={rel.stream_id}"
+            size = (rel.movie.duration_secs or 6000) * 250 * 1024
+            return FileNode(filename, stream_url, size, "video/x-matroska")
+
+        return None
+
+    def _resolve_episode_by_filename(self, category: str, series_name: str, season_name: str, filename: str) -> Optional[FileNode]:
+        """Resolve an episode file by filename via DB lookup on stream_id."""
         try:
-            rel = M3UMovieRelation.objects.select_related('movie', 'm3u_account', 'category').get(stream_id=stream_id)
-        except M3UMovieRelation.DoesNotExist:
+            from apps.vod.models import M3UEpisodeRelation
+            from django.db.models import F
+        except ImportError:
             return None
 
-        if not rel.category or not rel.category.m3u_relations.filter(
-            m3u_account=rel.m3u_account, enabled=True
-        ).exists():
+        series = self._find_series_by_display_name(series_name)
+        if not series:
             return None
+
+        stream_part = filename.rsplit('-', 1)
+        if len(stream_part) < 2:
+            return None
+        stream_id = stream_part[-1].rsplit('.', 1)[0]
+
+        season_match = re.match(r'^S(\d{2})E(\d{2})\s+-', filename)
+        if not season_match:
+            return None
+
+        season_number = int(season_match.group(1))
+        episode_number = int(season_match.group(2))
+        if season_name != f"S{season_number:02d}":
+            return None
+
+        relations = M3UEpisodeRelation.objects.filter(
+            stream_id=stream_id,
+            episode__series=series,
+            episode__season_number=season_number,
+            episode__episode_number=episode_number,
+            series_relation__series=series,
+            series_relation__category__m3u_relations__enabled=True,
+            series_relation__category__m3u_relations__m3u_account=F("m3u_account"),
+        ).select_related('episode', 'm3u_account', 'series_relation', 'series_relation__category').distinct()
+        if category != "All":
+            relations = relations.filter(series_relation__category__name=category)
 
         base_url = _get_dispatcharr_base_url()
-        stream_url = f"{base_url}/proxy/vod/movie/{rel.movie.uuid}?stream_id={rel.stream_id}"
-        size = (rel.movie.duration_secs or 6000) * 250 * 1024
-        return FileNode(filename, stream_url, size, "video/x-matroska")
+        for rel in relations:
+            expected = self._build_episode_filename(rel.episode, rel)
+            if expected != filename:
+                continue
+
+            stream_url = f"{base_url}/proxy/vod/episode/{rel.episode.uuid}?stream_id={rel.stream_id}"
+            size = (rel.episode.duration_secs or 0) * 250 * 1024
+            return FileNode(filename, stream_url, size, "video/x-matroska")
+
+        return None
+
+    def _build_episode_filename(self, episode: Any, relation: Any) -> str:
+        season_key = f"S{episode.season_number:02d}"
+        episode_key = f"{season_key}E{episode.episode_number:02d}"
+        provider = relation.m3u_account.name[:20] if relation.m3u_account else "Unknown"
+        ext = relation.container_extension or "mkv"
+        return f"{episode_key} - {episode.name} - {provider}-{relation.stream_id}.{ext}"
 
     def get_series_from_db(self, category: Optional[str] = None) -> List[DirectoryNode]:
         """Get series from DB (live query, only enabled categories)"""
         try:
-            from apps.vod.models import Series
+            from apps.vod.models import M3USeriesRelation
+            from django.db.models import F
         except ImportError:
             return []
 
-        queryset = Series.objects.filter(
-            m3u_relations__category__m3u_relations__enabled=True
-        ).distinct()
+        queryset = M3USeriesRelation.objects.filter(
+            category__m3u_relations__enabled=True,
+            category__m3u_relations__m3u_account=F("m3u_account"),
+        ).select_related('series').order_by('series__name', 'series__year').distinct()
 
         if category:
-            queryset = queryset.filter(
-                m3u_relations__category__name=category
-            ).distinct()
+            queryset = queryset.filter(category__name=category)
 
         result = []
-        for series in queryset:
+        seen_series_ids = set()
+        for relation in queryset:
+            series = relation.series
+            if series.id in seen_series_ids:
+                continue
+            seen_series_ids.add(series.id)
+
             series_name = series.name
             if series.year and f"({series.year})" not in series.name:
                 series_name = f"{series.name} ({series.year})"
 
             dir_node = DirectoryNode(series_name)
             dir_node.metadata["series_uuid"] = str(series.uuid)
-            dir_node.metadata["hydrated"] = series.episodes.exists()
             result.append(dir_node)
 
         return result
@@ -409,7 +471,7 @@ class VirtualTree:
 
     def get_seasons_from_db(self, series_uuid: str) -> List[DirectoryNode]:
         """Get seasons/episodes from DB (live query)"""
-        logger.info("get_seasons_from_db called for UUID: %s", series_uuid)
+        logger.debug("get_seasons_from_db called for UUID: %s", series_uuid)
         try:
             from integration import DispatcharrIntegrator
         except ImportError:
@@ -421,7 +483,7 @@ class VirtualTree:
             return []
 
         episodes = integrator.get_series_episodes(series_uuid)
-        logger.info("get_seasons_from_db found %d episodes for UUID: %s", len(episodes), series_uuid)
+        logger.debug("get_seasons_from_db found %d episodes for UUID: %s", len(episodes), series_uuid)
         base_url = _get_dispatcharr_base_url()
 
         seasons = {}
@@ -436,7 +498,7 @@ class VirtualTree:
                 provider = stream['account_name'][:20] if stream['account_name'] else "Unknown"
                 size = stream.get('size', 0)
 
-                filename = f"{season_key}E{episode['episode_number']:02d} - {episode['name']} - {provider}.{ext}"
+                filename = f"{season_key}E{episode['episode_number']:02d} - {episode['name']} - {provider}-{stream['stream_id']}.{ext}"
                 file_node = FileNode(filename, stream_url, size, "video/x-matroska")
                 seasons[season_key].add_child(file_node)
 

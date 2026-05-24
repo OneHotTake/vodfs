@@ -24,13 +24,6 @@
       "help_text": "Port for the HTTP filesystem server"
     },
     {
-      "id": "auto_hydrate_empty_series",
-      "label": "Auto-hydrate Empty Series",
-      "type": "boolean",
-      "default": true,
-      "help_text": "Automatically fetch episodes when browsing Series directories"
-    },
-    {
       "id": "dispatcharr_base_url",
       "label": "Dispatcharr Base URL",
       "type": "string",

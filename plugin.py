@@ -103,7 +103,6 @@ class Plugin:
 
         # Get settings
         port = settings.get("http_port", 8888)
-        auto_hydrate = settings.get("auto_hydrate_empty_series", True)
         dispatcharr_base_url = settings.get("dispatcharr_base_url", "http://127.0.0.1:9191")
         enable_auth = settings.get("enable_auth", False)
 
@@ -164,8 +163,7 @@ class Plugin:
                 "status": "ok",
                 "message": "HTTP filesystem server enabled",
                 "pid": process.pid,
-                "port": port,
-                "auto_hydrate": auto_hydrate
+                "port": port
             }
         except Exception as e:
             logger.exception("Failed to start server: %s", e)

@@ -2,6 +2,7 @@
 
 import os
 import logging
+from collections import defaultdict
 from typing import List, Dict, Any, Optional
 
 try:
@@ -42,17 +43,32 @@ class DispatcharrIntegrator:
             return []
 
         base_url = _get_dispatcharr_base_url()
-        episodes = series.episodes.all().order_by('season_number', 'episode_number')
+        episodes = list(series.episodes.all().order_by('season_number', 'episode_number'))
+        episode_ids = [episode.id for episode in episodes]
+
+        try:
+            from django.db.models import F
+        except ImportError:
+            F = None
+
+        relations_by_episode = defaultdict(list)
+        if episode_ids and F is not None:
+            relations = M3UEpisodeRelation.objects.filter(
+                episode_id__in=episode_ids,
+                series_relation__series=series,
+                series_relation__category__m3u_relations__enabled=True,
+                series_relation__category__m3u_relations__m3u_account=F("m3u_account"),
+            ).select_related('episode', 'm3u_account', 'series_relation', 'series_relation__category').distinct()
+
+            for rel in relations:
+                relations_by_episode[rel.episode_id].append(rel)
 
         result = []
         for episode in episodes:
-            # Get M3U relations for streaming URLs
-            relations = M3UEpisodeRelation.objects.filter(episode=episode)
-
             streams = []
-            for rel in relations:
+            for rel in relations_by_episode.get(episode.id, []):
                 # Use Dispatcharr proxy URL instead of direct provider URL
-                stream_url = f"{base_url}/proxy/vod/episode/{episode.uuid}"
+                stream_url = f"{base_url}/proxy/vod/episode/{episode.uuid}?stream_id={rel.stream_id}"
 
                 # Estimate size from duration (if available)
                 # Typical streaming bitrate: ~2 Mbps = 250 KB/s

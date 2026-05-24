@@ -3,17 +3,18 @@
 import logging
 import os
 import uvicorn
+from contextlib import asynccontextmanager
 from typing import List
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import Response, JSONResponse
 
 try:
     from .tree import VirtualTree
-    from .httpfs import HTTPFilesystem
+    from .httpfs import HTTPFilesystem, shutdown_executor
     from .integration import DispatcharrIntegrator
 except (ImportError, AttributeError):
     from tree import VirtualTree
-    from httpfs import HTTPFilesystem
+    from httpfs import HTTPFilesystem, shutdown_executor
     from integration import DispatcharrIntegrator
 
 logger = logging.getLogger(__name__)
@@ -81,17 +82,17 @@ def _check_django_available():
 
 def create_app(tree: VirtualTree) -> FastAPI:
     """Create FastAPI application with HTTP filesystem handlers"""
-    app = FastAPI(title="VOD HTTP Filesystem")
-    httpfs = HTTPFilesystem(tree)
-
-    @app.on_event("startup")
-    async def startup_event():
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
         _check_django_available()
+        try:
+            yield
+        finally:
+            shutdown_executor()
+            logger.info("Shutdown complete")
 
-    @app.on_event("shutdown")
-    async def shutdown_event():
-        """Cleanup on shutdown"""
-        logger.info("Shutdown complete")
+    app = FastAPI(title="VOD HTTP Filesystem", lifespan=lifespan)
+    httpfs = HTTPFilesystem(tree)
 
     @app.get("/healthz")
     async def healthz():

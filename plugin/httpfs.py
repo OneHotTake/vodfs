@@ -5,7 +5,7 @@ import asyncio
 from typing import Dict, Any, Optional, List
 from fastapi import Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
-from jinja2 import Template, select_autoescape
+from jinja2 import Template
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
 
@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 
 _executor = ThreadPoolExecutor(max_workers=4)
 _directory_cache = LRUCache(max_size=5000, ttl=600)
+
+
+def shutdown_executor() -> None:
+    """Stop background worker threads used for synchronous ORM calls."""
+    _executor.shutdown(wait=False, cancel_futures=True)
 
 _DIR_LISTING_TEMPLATE = Template("""<!DOCTYPE html>
 <html>
@@ -206,10 +211,10 @@ class HTTPFilesystem:
 
     async def _get_seasons_listing(self, series_name: str, category: str) -> List[Dict[str, str]]:
         """Get seasons/episodes listing with lazy DB query"""
-        logger.info("_get_seasons_listing called for: %s", series_name)
+        logger.debug("_get_seasons_listing called for: %s", series_name)
         loop = asyncio.get_running_loop()
         series_uuid = await loop.run_in_executor(_executor, self.tree.find_series_uuid_by_name, series_name)
-        logger.info("_get_seasons_listing found UUID: %s", series_uuid)
+        logger.debug("_get_seasons_listing found UUID: %s", series_uuid)
 
         if not series_uuid:
             logger.warning("Could not find UUID for series: %s", series_name)
@@ -237,10 +242,10 @@ class HTTPFilesystem:
 
     async def _get_episodes_listing(self, series_name: str, season_name: str, category: str) -> List[Dict[str, str]]:
         """Get episodes listing for a specific season with lazy DB query"""
-        logger.info("_get_episodes_listing called for: %s/%s", series_name, season_name)
+        logger.debug("_get_episodes_listing called for: %s/%s", series_name, season_name)
         loop = asyncio.get_running_loop()
         series_uuid = await loop.run_in_executor(_executor, self.tree.find_series_uuid_by_name, series_name)
-        logger.info("_get_episodes_listing found UUID: %s", series_uuid)
+        logger.debug("_get_episodes_listing found UUID: %s", series_uuid)
 
         if not series_uuid:
             logger.warning("Could not find UUID for series: %s", series_name)
