@@ -137,7 +137,7 @@ A directory listing is just a Django ORM query against Dispatcharr's `M3UMovieRe
 
 This is why the plugin can stay roughly a thousand lines and why it doesn't drift out of sync with Dispatcharr — there is no second copy of the library to drift.
 
-For implementation detail, see [`architecture/OVERVIEW.md`](architecture/OVERVIEW.md) and [`architecture/HTTPFS.md`](architecture/HTTPFS.md).
+For implementation detail, see [`docs/OVERVIEW.md`](docs/OVERVIEW.md) and [`docs/HTTPFS.md`](docs/HTTPFS.md).
 
 ## Troubleshooting
 

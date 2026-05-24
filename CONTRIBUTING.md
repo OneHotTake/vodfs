@@ -4,7 +4,7 @@ VODFS is a small plugin. The contribution loop is small to match.
 
 ## Before You Start
 
-- Read [`architecture/OVERVIEW.md`](architecture/OVERVIEW.md) and [`architecture/HTTPFS.md`](architecture/HTTPFS.md). The plugin's design is deliberately constrained — no manifest, no media proxying, no background workers — and PRs that reintroduce any of those will probably get pushed back.
+- Read [`docs/OVERVIEW.md`](docs/OVERVIEW.md) and [`docs/HTTPFS.md`](docs/HTTPFS.md). The plugin's design is deliberately constrained — no manifest, no media proxying, no background workers — and PRs that reintroduce any of those will probably get pushed back.
 - Open an issue first for anything larger than a bug fix or a small ergonomic change, so we can agree on the shape before you spend time on it.
 
 ## Development Loop

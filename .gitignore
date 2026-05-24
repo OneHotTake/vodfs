@@ -76,3 +76,8 @@ rclone.conf
 TOKEN_BUDGET.md
 .ai/TOKEN_BUDGET.md
 config.json
+
+# Local-only session scaffolding (kept on disk, not in git)
+/BACKLOG.md
+/REPO_MAP.md
+/TODO.md

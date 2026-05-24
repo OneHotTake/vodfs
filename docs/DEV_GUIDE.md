@@ -21,9 +21,7 @@ vodfs/
 │   ├── tree.py              # Virtual path resolution; live DB lookups
 │   ├── integration.py       # Dispatcharr model integration
 │   └── cache.py             # In-memory TTL/LRU cache for directory listings
-├── architecture/            # OVERVIEW.md, HTTPFS.md
-├── docs/                    # DEV_GUIDE.md, TROUBLESHOOTING.md
-├── tests/                   # pytest suites
+├── docs/                    # OVERVIEW.md, HTTPFS.md, DEV_GUIDE.md, TROUBLESHOOTING.md
 └── scripts/                 # Helper scripts
 ```
 
@@ -46,19 +44,6 @@ curl -I http://127.0.0.1:8888/Movies/All/"Some Title (2024) - PROV-12345.mkv"
 ```
 
 The last one should come back as `302 Found` with a `Location:` pointing into Dispatcharr's `/proxy/vod/...` namespace. If it doesn't, the bug is almost certainly in `tree.py`'s filename-to-stream-ID parser or in `integration.py`'s enabled-relation check.
-
-## Testing
-
-```bash
-python -m pytest tests/
-python -m pytest tests/ --cov=plugin --cov-report=html
-```
-
-Integration tests that need a live Dispatcharr are gated:
-
-```bash
-python -m pytest tests/ -m live
-```
 
 ## Style Notes
 
