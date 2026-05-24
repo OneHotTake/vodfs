@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `302` redirects to Dispatcharr's `/proxy/vod/movie/...` and `/proxy/vod/episode/...` on file opens; VODFS never streams media bytes itself.
 - `/rclone_conf` endpoint returning a paste-ready rclone remote block, suggested mount point, mount command, and Plex library paths, keyed to the request's incoming host.
 - `/healthz` liveness endpoint.
+- `/stats` endpoint returning library visibility counts (totals plus per-enabled-category breakdown for movies and series, plus directory-cache stats). Mirrors the same enabled-category/same-account predicate the directory listings use, so the numbers reflect what rclone and Plex see. Counts only — no titles, URLs, or credentials. Gated by the same auth/network checks as the other endpoints.
 - `/fortune` endpoint.
 - Optional token authentication against existing Dispatcharr API keys (`Authorization: ApiKey <key>` or `X-API-Key: <key>`).
 - Inheritance of Dispatcharr's stream network-access policy when constructing redirect URLs.

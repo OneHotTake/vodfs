@@ -1,5 +1,6 @@
 """FastAPI HTTP server for VOD filesystem - live DB queries"""
 
+import asyncio
 import logging
 import os
 import random
@@ -11,11 +12,11 @@ from fastapi.responses import Response, JSONResponse
 
 try:
     from .tree import VirtualTree
-    from .httpfs import HTTPFilesystem, shutdown_executor
+    from .httpfs import HTTPFilesystem, shutdown_executor, _directory_cache
     from .integration import DispatcharrIntegrator
 except (ImportError, AttributeError):
     from tree import VirtualTree
-    from httpfs import HTTPFilesystem, shutdown_executor
+    from httpfs import HTTPFilesystem, shutdown_executor, _directory_cache
     from integration import DispatcharrIntegrator
 
 logger = logging.getLogger(__name__)
@@ -137,6 +138,55 @@ url = {base_url}
 """
 
 
+def _query_stats_sync() -> dict:
+    """Synchronous ORM portion of /stats. Returns counts only."""
+    try:
+        from apps.vod.models import M3UMovieRelation, M3USeriesRelation
+        from django.db.models import F, Count
+    except ImportError:
+        return {"available": False}
+
+    enabled = dict(
+        category__m3u_relations__enabled=True,
+        category__m3u_relations__m3u_account=F("m3u_account"),
+    )
+
+    def per_category(model):
+        rows = (
+            model.objects.filter(**enabled)
+            .values("category__name")
+            .annotate(n=Count("id", distinct=True))
+            .order_by("-n")
+        )
+        return {r["category__name"]: r["n"] for r in rows if r["category__name"]}
+
+    def total(model):
+        return model.objects.filter(**enabled).distinct().count()
+
+    return {
+        "available": True,
+        "movies": {
+            "total": total(M3UMovieRelation),
+            "by_category": per_category(M3UMovieRelation),
+        },
+        "series": {
+            "total": total(M3USeriesRelation),
+            "by_category": per_category(M3USeriesRelation),
+        },
+    }
+
+
+async def _collect_stats() -> dict:
+    """Run stats query off the event loop and merge in cache info."""
+    loop = asyncio.get_event_loop()
+    library = await loop.run_in_executor(None, _query_stats_sync)
+    return {
+        "library": library,
+        "cache": _directory_cache.stats(),
+        "auth_enabled": _ENABLE_AUTH,
+    }
+
+
 def create_app(tree: VirtualTree) -> FastAPI:
     """Create FastAPI application with HTTP filesystem handlers"""
     @asynccontextmanager
@@ -213,6 +263,21 @@ def create_app(tree: VirtualTree) -> FastAPI:
             content=random.choice(_FORTUNES) + "\n",
             media_type="text/plain; charset=utf-8",
         )
+
+    @app.get("/stats")
+    async def stats(
+        _network=Depends(check_network_access),
+        _auth=Depends(check_api_key_auth),
+    ):
+        """Return library visibility counts.
+
+        Answers the operator question: 'is the plugin actually seeing
+        my library?' Counts only — no titles, URLs, or credentials.
+        Uses the same enabled-category/same-account predicate the
+        directory listings use, so the numbers reflect what rclone
+        and Plex will see.
+        """
+        return JSONResponse(content=await _collect_stats())
 
     @app.api_route("/{path:path}", methods=["GET", "HEAD"])
     async def handle_request(

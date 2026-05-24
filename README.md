@@ -143,7 +143,13 @@ For implementation detail, see [`docs/OVERVIEW.md`](docs/OVERVIEW.md) and [`docs
 
 **The rclone config page won't open.** Check that the server is up: `curl http://127.0.0.1:8888/healthz`. If Dispatcharr is in Docker, you need the container IP or a mapped host port, not loopback.
 
-**rclone mounts but the folders are empty.** Confirm in Dispatcharr that VOD content exists, the relevant categories are enabled, and the providing M3U account is active. Then sanity-check from the same host:
+**rclone mounts but the folders are empty.** Hit `/stats` first — it returns counts of what VODFS can currently see, broken down per enabled category:
+
+```bash
+curl http://127.0.0.1:8888/stats
+```
+
+If the totals are zero, the problem is upstream: confirm in Dispatcharr that VOD content exists, the relevant categories are enabled, and the providing M3U account is active. If `/stats` shows non-zero but a specific folder is empty, check that category in particular. You can also sanity-check the listings directly:
 
 ```bash
 curl http://127.0.0.1:8888/Movies/
