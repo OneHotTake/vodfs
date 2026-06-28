@@ -101,9 +101,20 @@ def _build_rclone_config(base_url: str) -> str:
     return f"""# VODFS rclone remote
 # Paste the [vodfs] block into your rclone.conf file.
 # Suggested mount point: /mnt/vodfs
-# Mount command:
-#   mkdir -p /mnt/vodfs
-#   rclone mount vodfs: /mnt/vodfs --allow-other --vfs-cache-mode off --dir-cache-time 1h --poll-interval 0
+# Mount command (use --vfs-cache-mode full for Plex — see note below):
+#   mkdir -p /mnt/vodfs /var/cache/vodfs
+#   rclone mount vodfs: /mnt/vodfs --allow-other --read-only \\
+#     --vfs-cache-mode full --cache-dir /var/cache/vodfs \\
+#     --vfs-cache-max-size 100G --vfs-cache-max-age 24h \\
+#     --vfs-read-ahead 256M --buffer-size 64M \\
+#     --dir-cache-time 1h --poll-interval 0
+#
+# WHY --vfs-cache-mode full (NOT off): Plex transcodes/remuxes and seeks (resume,
+# scrub, replay). With cache off, every seek re-opens the stream from a new offset,
+# re-fetching from the provider — which thrashes and, on a provider with a low
+# max_streams, fails outright ("No available stream"). cache=full serves seeks/
+# replays from local disk; the provider is read once. (cache=off is fine only for a
+# single sequential watch.)
 # Plex library paths (prefer per-category dirs on large libraries; /All can be huge):
 #   Movies: /mnt/vodfs/Movies/<Category>   (or /mnt/vodfs/Movies/All)
 #   Series: /mnt/vodfs/Series/<Category>   (or /mnt/vodfs/Series/All)

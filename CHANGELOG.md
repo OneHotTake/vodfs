@@ -23,6 +23,7 @@ Robustness pass informed by a comparison against the VOD2MLIB plugin — adoptin
 - **Title junk after a duplicated year.** `parse_title` truncates at the first *parenthesised* year and strips inline resolution/codec tokens, so `Cool Hand Luke 4K (1967) PAUL NEWMAN (1967)` becomes `Cool Hand Luke (1967)`. A bare year that is part of the title (`Blade Runner 2049`) is preserved; real-word codes (`Max`, `HBO`) are never stripped.
 
 ### Changed
+- **Generated rclone config now recommends `--vfs-cache-mode full`** (was `off`). Plex transcodes and *seeks* (resume/scrub/replay); with caching off every seek re-fetches from the provider, which thrashes and fails on a connection-limited provider. See `docs/PLAYBACK.md` — which also covers the provider `max_streams` requirement and Dispatcharr's VOD connection leak, and the dev-vs-prod testing gap (a one-shot `ffmpeg` read does not exercise seek/resume/replay).
 - **Sizes come from Dispatcharr's own metadata, never a probe.** `size_from_bitrate()` reads the provider's overall bitrate × duration from both shapes — movies at `custom_properties.detailed_info`, episodes at `custom_properties.info.info` (matched a real probe to ~0.002% on a 4K movie, ~1% on episodes). The video-stream-only `NUMBER_OF_BYTES` is deliberately ignored (it under-reports the file → truncation). `VODFS_PROBE_SIZE` defaults **off**.
 - Enabling the plugin now validates the Dispatcharr base URL (scheme + host) up front and refuses to start on a malformed value.
 
