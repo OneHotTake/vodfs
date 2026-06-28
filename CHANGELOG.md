@@ -10,14 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Robustness pass informed by a comparison against the VOD2MLIB plugin — adopting the fixes that apply to our live-query/302 model, while deliberately skipping its push-to-disk machinery (`.strm`/`.nfo` files, cron rescans, on-disk URL persistence) that our architecture doesn't need.
 
 ### Added
-- **Unit test suite** (`tests/`, 50 pure-helper tests, ~0.2s) covering provider-name parsing, Plex naming, external-ID formatting, filename sanitisation, path-resolution regexes, and base-URL validation — no Django/DB required. Run with `python3 -m pytest tests/`.
+- **Unit test suite** (`tests/`, 54 pure-helper tests, ~0.2s) covering provider-name parsing, Plex naming, external-ID formatting, filename sanitisation, path-resolution regexes, tiered sizing, and base-URL validation — no Django/DB required. Run with `python3 -m pytest tests/`.
 - **Orphaned-content counts in `/stats`** — reports movies/series hidden because their provider account is inactive, so a sudden drop in visible counts is explainable.
 
 ### Fixed
+- **OOM on large libraries.** `/Movies/All` (and category/series lists) built the entire listing in RAM — at ~100k titles it ballooned to ~2 GB and got OOM-killed. Listings now **stream** (`.values()` + `.order_by(id).iterator()` + `StreamingResponse`, emitting rows incrementally); peak RSS is flat (~150 MB measured at 83k entries) regardless of library size. The warmed folder→id maps were dropped (descent falls back to the existing tmdb/imdb/title lookup).
+- **Provider hammering during a Plex scan.** Probing the real size on every file meant one upstream request per title (10k titles → 10k back-to-back hits, risking an account/IP flag). Size probing is now **off by default** (`VODFS_PROBE_SIZE=false`); the proxy still reports the true size at playback. The generated rclone config keeps `no_head=false` (so rclone reads the cheap, provider-free estimate via HEAD) and documents disabling Plex deep-analysis + setting Dispatcharr per-provider max-connections.
+- **Plugin failed to load before deps were installed.** `plugin/__init__.py` eagerly imported uvicorn/fastapi; made lazy (PEP 562) so Dispatcharr can load the plugin in-process without the child-process deps.
 - **Dead redirects from deactivated providers.** Listings and file resolution now require `m3u_account__is_active=True`, so content from a provider deactivated in Dispatcharr (whose category relations were still enabled) no longer surfaces as files that 302 to a dead proxy.
 - **Title junk after a duplicated year.** `parse_title` now truncates at the first *parenthesised* year and strips inline resolution/codec tokens, so `Cool Hand Luke 4K (1967) PAUL NEWMAN (1967)` becomes `Cool Hand Luke (1967)`. A bare year that is part of the title (`Blade Runner 2049`) is preserved, and real-word codes (`Max`, `HBO`) are never stripped.
 
 ### Changed
+- **Sizes come from Dispatcharr's own metadata, not a probe.** New tiered `size_from_metadata()`: provider `bitrate × duration` from `custom_properties.detailed_info` (exact — matched a real probe to 0.002% on a 4K title) → duration-based estimate → 2 GiB fallback. Never contacts the provider for sizing; run Dispatcharr's VOD detailed-info refresh to populate bitrate library-wide.
 - Enabling the plugin now validates the Dispatcharr base URL (scheme + host) up front and refuses to start on a malformed value, instead of serving dead redirects discovered much later.
 
 ## [0.42.0] — 2026-06-28
