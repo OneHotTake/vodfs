@@ -6,7 +6,6 @@ Supports category browsing, multi-provider streaming, and episode hydration.
 """
 
 import os
-import sys
 import json
 import signal
 import subprocess

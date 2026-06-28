@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from typing import Dict, List, Optional
+from typing import List
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import Request, Response
@@ -11,10 +11,10 @@ from jinja2 import Template
 from urllib.parse import quote
 
 try:
-    from .tree import DirectoryNode, VirtualTree
+    from .tree import VirtualTree
     from .cache import LRUCache
 except ImportError:
-    from tree import DirectoryNode, VirtualTree
+    from tree import VirtualTree
     from cache import LRUCache
 
 

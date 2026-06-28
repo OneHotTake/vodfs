@@ -25,8 +25,8 @@ def setup_django():
 
         _use_blocking_db_backend()
 
-        # Verify model access
-        from apps.vod.models import Movie, Series
+        # Verify model access — the import itself is the check (raises if unavailable)
+        from apps.vod.models import Movie, Series  # noqa: F401
         logger.info("VOD models accessible: Movie, Series")
         return True
     except Exception as e:
