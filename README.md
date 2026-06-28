@@ -122,6 +122,16 @@ For implementation detail see [`docs/OVERVIEW.md`](docs/OVERVIEW.md), [`docs/HTT
 
 ## Troubleshooting
 
+**Won't start / Status is RED — "dependencies not installed".** The child server needs `uvicorn`, `fastapi`, and `jinja2`, which aren't in Dispatcharr's base image. VODFS pip-installs them on Enable; if that fails (no network, locked-down pip, `externally-managed-environment`), **Status and Enable turn red and print the exact fix** — including which packages are missing and a copy/paste `docker exec` line with your container name already filled in. Install them by hand on the Docker host (substitute your Dispatcharr container name):
+
+```bash
+docker exec <dispatcharr-container> /dispatcharrpy/bin/python -m pip install uvicorn fastapi jinja2
+# if pip itself is missing, bootstrap it first:
+docker exec <dispatcharr-container> /dispatcharrpy/bin/python -m ensurepip --upgrade
+```
+
+Then click **🚀 Enable** again — Status goes green once they import. Note: a Dispatcharr image update recreates the container and wipes these, so re-run after updates.
+
 **Config page won't open / folders empty.** Check `curl http://127.0.0.1:8888/healthz`, then `curl http://127.0.0.1:8888/stats` — it returns per-category counts of what VODFS can see. Zero means the problem is upstream (no VOD content, category not enabled, or M3U account inactive).
 
 **Plex sees titles but playback fails.** The redirect targets the **Dispatcharr Base URL** plugin setting. It must be reachable *from the Plex host*, not just from Dispatcharr — set it to a LAN address or container alias Plex can resolve.

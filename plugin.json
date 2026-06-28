@@ -15,6 +15,12 @@
       "description": "1) Click 🚀 Enable. 2) Click 📋 rclone Config and follow it (it links to /vodfs/rclone_conf on this host). 3) Point Plex at /mnt/vodfs/Movies/<Category> (per-category, not /All). 4) Click 💧 Hydrate Now — titles appear as Dispatcharr fetches their size. 5) Click 🩺 Status anytime to see progress. Tip: open /vodfs/ in a browser to inspect the filesystem."
     },
     {
+      "id": "_dependencies",
+      "label": "🛠 If it won't start (dependencies)",
+      "type": "info",
+      "description": "The HTTP server needs three Python packages that are not in Dispatcharr's base image: uvicorn, fastapi, jinja2. The plugin tries to pip-install them automatically on Enable. If that fails, Status turns RED and shows the exact fix. To install them by hand, run this on your Docker host (replace the container name with your Dispatcharr container):  docker exec <dispatcharr-container> /dispatcharrpy/bin/python -m pip install uvicorn fastapi jinja2  — if pip itself is missing, first run:  docker exec <dispatcharr-container> /dispatcharrpy/bin/python -m ensurepip --upgrade  — then click 🚀 Enable again. Note: these get wiped if the Dispatcharr container is recreated (image update), so you may need to re-run them after an update."
+    },
+    {
       "id": "http_port",
       "label": "HTTP Port",
       "type": "number",
