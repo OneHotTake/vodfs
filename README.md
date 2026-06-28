@@ -73,6 +73,20 @@ On first enable VODFS installs its own web dependencies (`uvicorn`, `fastapi`, `
 /dispatcharrpy/bin/python -m pip install uvicorn fastapi jinja2
 ```
 
+### Why VODFS needs external dependencies
+
+VODFS runs a small HTTP server in its **own child process** (bound to a port you choose), separate from Dispatcharr's web workers. It does this on purpose: serving file bytes-ranges and directory walks to rclone must never block Dispatcharr's request workers, and the child needs its own control over the bind host and a plain blocking DB path. That child process is an ASGI app, and Dispatcharr ships a Django/WSGI (gevent) stack — not an ASGI one — so the three pieces that stack lacks are pulled in explicitly:
+
+| Dependency | Why it's needed |
+|------------|-----------------|
+| **`fastapi`** | The web framework that *is* the filesystem: routing for the `GET`/`HEAD` handlers, the directory-index responses, `302` redirects to Dispatcharr's VOD proxy, and the `/healthz`, `/stats`, and `/rclone_conf` endpoints. |
+| **`uvicorn`** | The ASGI server that actually runs the FastAPI app and listens on the port — the HTTP listener rclone connects to. Dispatcharr's gevent/WSGI server can't host an ASGI app. |
+| **`jinja2`** | Renders the minimal HTML directory-index pages that rclone's `http` backend parses to walk the tree. No template engine, no listings rclone can read. |
+
+These are small, ubiquitous, MIT/BSD-licensed PyPI packages with no native build step. They are installed **only into Dispatcharr's existing Python environment** (the same `pip` Dispatcharr itself uses) — VODFS does not create a venv, download binaries, or touch system packages. You can pre-install them yourself (command above) and VODFS will detect them and skip the install. The check is a simple `importlib.util.find_spec` for each module; if all three are present, nothing is installed.
+
+What VODFS does **not** add: it needs no database driver of its own. The standalone child reuses Dispatcharr's already-installed **psycopg3**, simply swapping the gevent connection pool for the standard blocking backend inside its own process — so there is no extra DB dependency to install. Beyond the three packages above, VODFS pulls in nothing.
+
 ## rclone configuration & mounting
 
 After enabling, open `http://<vodfs-host>:8888/rclone_conf` for a paste-ready `[vodfs]` remote. Whatever host you open it from is the host that ends up in `url =`, so use the address rclone will actually reach (the container or LAN IP, not `127.0.0.1`).
