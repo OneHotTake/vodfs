@@ -63,6 +63,11 @@ Thumbs.db
 *.secret
 credentials.json
 secrets/
+disp_user
+disp_pass
+*_pass
+*_user
+*.creds
 
 # Local config overrides
 config.local.json
@@ -83,3 +88,6 @@ config.json
 
 # Dispatcharr plugin hot-reload marker (runtime)
 .reload_token
+
+# Host-specific production deployment notes (IPs/paths/access) - keep out of public repo
+docs/DEPLOYMENT-*.md
