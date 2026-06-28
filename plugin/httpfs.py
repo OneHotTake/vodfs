@@ -1,12 +1,13 @@
 """HTTP filesystem request handlers: directory listings + 302 file redirects."""
 
 import asyncio
+import html
 import logging
 from typing import List
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import Request, Response
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from jinja2 import Template
 from urllib.parse import quote
 
@@ -38,6 +39,24 @@ a{text-decoration:none;color:#06c}a:hover{text-decoration:underline}</style></he
 {% for e in entries %}<tr><td><a href="{{ e.href }}">{{ e.name }}</a></td><td>{{ e.size }}</td></tr>
 {% endfor %}</tbody></table></body></html>
 """, autoescape=True)
+
+
+# Streamed equivalent of _DIR_TEMPLATE for unbounded (movie/series) listings: same
+# markup, emitted row-by-row so a 100k-entry directory never materialises in RAM.
+_LISTING_HEAD = ("""<!DOCTYPE html>
+<html><head><title>Index of {path}</title>
+<style>body{{font-family:monospace;padding:20px}}table{{border-collapse:collapse;width:100%}}
+th{{text-align:left;padding:5px;border-bottom:1px solid #ccc}}td{{padding:5px}}
+a{{text-decoration:none;color:#06c}}a:hover{{text-decoration:underline}}</style></head>
+<body><h1>Index of {path}</h1><table>
+<thead><tr><th>Name</th><th>Size</th></tr></thead><tbody>
+""")
+_LISTING_TAIL = "</tbody></table></body></html>\n"
+
+
+def _stream_row(name: str, href: str) -> str:
+    return ('<tr><td><a href="%s">%s</a></td><td></td></tr>\n'
+            % (html.escape(href, quote=True), html.escape(name)))
 
 
 def _fmt_size(n: int) -> str:
@@ -119,6 +138,13 @@ class HTTPFilesystem:
         })
 
     async def serve_directory(self, path: str) -> Response:
+        comps = [c for c in path.split("/") if c]
+        # The only unbounded listings are the movie/series folder lists
+        # (/Movies/{All|cat}, /Series/{All|cat}) — stream those to bound memory.
+        # Everything else (root, categories, a movie's files, a season's episodes)
+        # is small, so keep the simple cached+rendered path.
+        if len(comps) == 2 and comps[0] in ("Movies", "Series"):
+            return self._stream_listing(path, comps)
         try:
             cached = _directory_cache.get(f"dir:{path}")
             if cached is None:
@@ -129,6 +155,36 @@ class HTTPFilesystem:
         except Exception:
             logger.exception("Failed to serve directory %s", path)
             return Response(status_code=500, content="Error listing directory")
+
+    def _stream_listing(self, path: str, comps: List[str]) -> StreamingResponse:
+        category = None if comps[1] == "All" else comps[1]
+        source = (self.tree.movies_stream if comps[0] == "Movies"
+                  else self.tree.series_stream)
+
+        def rows():
+            # Runs in Starlette's threadpool. Django connections are thread-local;
+            # bracket the server-side cursor with connection hygiene.
+            try:
+                from django.db import close_old_connections
+            except ImportError:
+                close_old_connections = None
+            if close_old_connections:
+                close_old_connections()
+            try:
+                yield _LISTING_HEAD.format(path=html.escape(path))
+                yield _stream_row("../", "../")
+                for folder in source(category):
+                    yield _stream_row(folder + "/", quote(folder) + "/")
+                yield _LISTING_TAIL
+            except Exception:
+                logger.exception("Failed while streaming directory %s", path)
+                # Response is already in flight; close the markup so clients don't hang.
+                yield _LISTING_TAIL
+            finally:
+                if close_old_connections:
+                    close_old_connections()
+
+        return StreamingResponse(rows(), media_type="text/html; charset=utf-8")
 
     async def _build_listing(self, path: str) -> List[dict]:
         comps = [c for c in path.split("/") if c]

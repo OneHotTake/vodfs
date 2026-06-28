@@ -289,11 +289,20 @@ class DispatcharrIntegrator:
     def parse(self, raw: str, year_field: Any = None) -> Dict[str, Any]:
         return parse_title(raw, year_field)
 
+    @staticmethod
+    def folder_name_from_fields(name, year=None, tmdb_id=None, imdb_id=None) -> str:
+        """Plex-correct folder name from raw fields (no model instance needed).
+
+        Lets streamed listings build names straight from a ``.values()`` row,
+        avoiding the per-item model-object overhead that OOMs huge libraries.
+        """
+        p = parse_title(name, year)
+        return sanitize_filename(_title_with_year(p) + format_external_ids(tmdb_id, imdb_id))
+
     def movie_folder_name(self, movie) -> str:
-        p = parse_title(movie.name, getattr(movie, 'year', None))
-        base = _title_with_year(p) + format_external_ids(
+        return self.folder_name_from_fields(
+            movie.name, getattr(movie, 'year', None),
             getattr(movie, 'tmdb_id', None), getattr(movie, 'imdb_id', None))
-        return sanitize_filename(base)
 
     def movie_filename(self, movie, relation, provider_label: str = '') -> str:
         p = parse_title(movie.name, getattr(movie, 'year', None))
@@ -303,10 +312,9 @@ class DispatcharrIntegrator:
         return sanitize_filename(base + _provider_suffix(provider_label, relation)) + '.' + ext
 
     def series_folder_name(self, series) -> str:
-        p = parse_title(series.name, getattr(series, 'year', None))
-        base = _title_with_year(p) + format_external_ids(
+        return self.folder_name_from_fields(
+            series.name, getattr(series, 'year', None),
             getattr(series, 'tmdb_id', None), getattr(series, 'imdb_id', None))
-        return sanitize_filename(base)
 
     @staticmethod
     def season_dir_name(season_number: int) -> str:
@@ -408,10 +416,14 @@ def estimate_size(duration_secs: Optional[int]) -> int:
 
 
 # --- accurate size probing ------------------------------------------------------
-# Plex seeks/analyses by byte range, so it needs the real file size. The native
-# proxy reports it via Content-Range. We probe once per stream and cache it; a
-# semaphore bounds concurrent provider connections during a library scan.
-_PROBE_ENABLED = os.environ.get("VODFS_PROBE_SIZE", "true").lower() == "true"
+# Plex seeks/analyses by byte range, so it CAN use the real file size. The native
+# proxy reports it via Content-Range, and also reports it at actual playback (206),
+# so a duration-based estimate is enough pre-playback. Probing is therefore OFF by
+# default: at scale, probing every file during a Plex scan means one upstream
+# request per title (10k titles -> 10k provider hits, back-to-back), which risks
+# the provider flagging the account/IP. Set VODFS_PROBE_SIZE=true to opt back in
+# (bounded by VODFS_PROBE_CONCURRENCY); pair with a small library or it will hammer.
+_PROBE_ENABLED = os.environ.get("VODFS_PROBE_SIZE", "false").lower() == "true"
 _size_cache: Dict[str, int] = {}
 _size_cache_lock = threading.Lock()
 _probe_sem = threading.Semaphore(int(os.environ.get("VODFS_PROBE_CONCURRENCY", "4")))

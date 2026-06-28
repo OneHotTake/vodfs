@@ -103,15 +103,29 @@ def _build_rclone_config(base_url: str) -> str:
 # Suggested mount point: /mnt/vodfs
 # Mount command:
 #   mkdir -p /mnt/vodfs
-#   rclone mount vodfs: /mnt/vodfs --allow-other --vfs-cache-mode off --dir-cache-time 5s --poll-interval 0
-# Plex library paths:
-#   Movies: /mnt/vodfs/Movies/All
-#   Series: /mnt/vodfs/Series/All
+#   rclone mount vodfs: /mnt/vodfs --allow-other --vfs-cache-mode off --dir-cache-time 1h --poll-interval 0
+# Plex library paths (prefer per-category dirs on large libraries; /All can be huge):
+#   Movies: /mnt/vodfs/Movies/<Category>   (or /mnt/vodfs/Movies/All)
+#   Series: /mnt/vodfs/Series/<Category>   (or /mnt/vodfs/Series/All)
+#
+# AVOID HAMMERING YOUR PROVIDER (important at scale):
+#   - 'no_head = true' below makes rclone trust the listing size instead of issuing
+#     a HEAD per file during a scan. Keep it on unless you specifically need exact
+#     sizes (set VODFS_PROBE_SIZE=true on the plugin, and expect provider load).
+#   - In Plex, DISABLE deep analysis during scan: Settings > Library >
+#     uncheck "Analyze audio tracks"/"Perform extensive media analysis", and prefer
+#     "Scan my library automatically" off / scheduled. Plex opening every file for
+#     analysis is what slams the provider, not vodfs.
+#   - In Dispatcharr, set a per-provider MAX CONNECTIONS on each M3U account so a
+#     scan can't open more upstream streams than your provider allows. vodfs only
+#     issues 302 redirects (it is never in the data path), so this cap is the right
+#     place to throttle.
 {auth_note}
 
 [vodfs]
 type = http
 url = {base_url}
+no_head = true
 {auth_line}
 """
 

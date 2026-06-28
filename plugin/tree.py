@@ -143,11 +143,38 @@ class VirtualTree:
         for g in grouped.values():
             mv = g['movie']
             folder = self._integrator.movie_folder_name(mv)
-            self._movie_map[folder] = mv.id
             out.append({'folder': folder, 'stream_count': len(g['rels']),
                         'size': estimate_size(mv.duration_secs)})
         out.sort(key=lambda e: e['folder'].lower())
         return out
+
+    def movies_stream(self, category: Optional[str] = None):
+        """Yield movie folder names (one per movie), streamed with bounded memory.
+
+        Ordered by ``movie_id`` (not folder name) so the queryset can be walked with
+        a server-side cursor via ``.iterator()`` and ``.values()`` — no model objects,
+        no full materialisation. Consecutive rows share a movie_id (multiple provider
+        relations), so we emit each movie once. Memory is O(chunk) at any size; this is
+        the path that survives a 100k-title ``/Movies/All``. Folder order is not
+        guaranteed (rclone/Plex enumerate the whole dir regardless of order)."""
+        try:
+            from apps.vod.models import M3UMovieRelation
+        except ImportError:
+            return
+        qs = (M3UMovieRelation.objects.filter(**_enabled())
+              .values('movie_id', 'movie__name', 'movie__year',
+                      'movie__tmdb_id', 'movie__imdb_id')
+              .order_by('movie_id'))
+        if category:
+            qs = qs.filter(category__name=category)
+        last = object()
+        for row in qs.iterator(chunk_size=2000):
+            if row['movie_id'] == last:
+                continue
+            last = row['movie_id']
+            yield self._integrator.folder_name_from_fields(
+                row['movie__name'], row['movie__year'],
+                row['movie__tmdb_id'], row['movie__imdb_id'])
 
     def movie_files(self, folder_name: str, category: Optional[str] = None) -> List[dict]:
         """Files (one per provider stream) inside a movie folder."""
@@ -190,10 +217,30 @@ class VirtualTree:
                 continue
             seen.add(s.id)
             folder = self._integrator.series_folder_name(s)
-            self._series_map[folder] = str(s.uuid)
             out.append({'folder': folder, 'uuid': str(s.uuid)})
         out.sort(key=lambda e: e['folder'].lower())
         return out
+
+    def series_stream(self, category: Optional[str] = None):
+        """Yield series folder names (one per series), streamed — see movies_stream."""
+        try:
+            from apps.vod.models import M3USeriesRelation
+        except ImportError:
+            return
+        qs = (M3USeriesRelation.objects.filter(**_enabled())
+              .values('series_id', 'series__name', 'series__year',
+                      'series__tmdb_id', 'series__imdb_id')
+              .order_by('series_id'))
+        if category:
+            qs = qs.filter(category__name=category)
+        last = object()
+        for row in qs.iterator(chunk_size=2000):
+            if row['series_id'] == last:
+                continue
+            last = row['series_id']
+            yield self._integrator.folder_name_from_fields(
+                row['series__name'], row['series__year'],
+                row['series__tmdb_id'], row['series__imdb_id'])
 
     def _series_episodes(self, show_name: str, category: Optional[str]):
         series = self._lookup_series(show_name, category)

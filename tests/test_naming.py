@@ -142,6 +142,18 @@ def test_movie_folder_name_full_pipeline():
     assert folder == "Mad Max Fury Road (2015) {tmdb-76341} {imdb-tt1392190}"
 
 
+def test_folder_name_from_fields_matches_model_path():
+    # The streamed-listing path builds names from raw .values() fields; it must
+    # produce the same result as the model-object path.
+    di = DispatcharrIntegrator()
+    movie = SimpleNamespace(name="ES|Mad Max 4K: Fury Road (2015)",
+                            year=2015, tmdb_id=76341, imdb_id="tt1392190")
+    from_fields = di.folder_name_from_fields(movie.name, movie.year,
+                                             movie.tmdb_id, movie.imdb_id)
+    assert from_fields == di.movie_folder_name(movie)
+    assert from_fields == "Mad Max Fury Road (2015) {tmdb-76341} {imdb-tt1392190}"
+
+
 def test_movie_filename_includes_stream_id_and_ext():
     movie = SimpleNamespace(name="Heat (1995)", year=1995, tmdb_id=None, imdb_id=None)
     rel = SimpleNamespace(stream_id="9988", container_extension="mp4")
