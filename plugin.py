@@ -133,7 +133,7 @@ class Plugin:
         if hy.get("enabled"):
             nxt = hy.get("next_run") or "manual only"
             run = "running now" if hy.get("running") else f"next run {nxt}"
-            lines.append(f"Hydration: {hy.get('rate_per_sec')}/sec, {run}.")
+            lines.append(f"Hydration: {hy.get('concurrency')} parallel fetches, {run}.")
             if hy.get("last_pass"):
                 lp = hy["last_pass"]
                 lines.append(f"Last pass ({lp.get('reason')}): {lp.get('movies')} movies, {lp.get('series')} series.")
@@ -249,7 +249,7 @@ class Plugin:
         env["VODFS_ENABLE_AUTH"] = str(enable_auth).lower()
 
         # Pass hydration (size-backfill scheduler) settings to the child
-        env["VODFS_HYDRATE_RATE"] = str(settings.get("hydrate_rate", 2))
+        env["VODFS_HYDRATE_CONCURRENCY"] = str(settings.get("hydrate_concurrency", 8))
         env["VODFS_HYDRATE_ON_LOAD"] = str(settings.get("hydrate_on_load", True)).lower()
         env["VODFS_HYDRATE_TIMES"] = str(settings.get("scheduled_times", "0300") or "")
         env["VODFS_HYDRATE_TZ"] = str(settings.get("timezone", "America/Chicago") or "America/Chicago")

@@ -59,13 +59,13 @@
       "help_text": "IANA timezone for the scheduled times (e.g. America/Chicago, Europe/London)."
     },
     {
-      "id": "hydrate_rate",
-      "label": "🐢 Hydration Rate (per second)",
+      "id": "hydrate_concurrency",
+      "label": "⚡ Hydration Concurrency (parallel fetches)",
       "type": "number",
-      "default": 2,
+      "default": 8,
       "min": 0,
-      "max": 50,
-      "help_text": "Refreshes submitted per second — the throttle. Higher = faster but more provider load. 0 disables hydration entirely."
+      "max": 64,
+      "help_text": "How many size-fetches run at once — the speed knob AND the provider-load cap. Each fetch is a ~0.5s network round-trip, so 8 parallel ≈ 8x a serial drip. Raise for a faster initial fill (e.g. 16–24); 0 disables hydration."
     },
     {
       "id": "hydrate_on_load",

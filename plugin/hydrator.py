@@ -9,10 +9,11 @@ PiratesIRC plugins: a daemon thread (no Celery beat), HHMM ``scheduled_times`` +
 timezone + a rate limit.
 
 All config arrives via env (set by the plugin's enable action):
-  VODFS_HYDRATE_RATE      refreshes/sec; 0 disables (default 0)
-  VODFS_HYDRATE_ON_LOAD   "true" => full pass when the server starts (default true)
-  VODFS_HYDRATE_TIMES     comma-separated HHMM, e.g. "0300,1500" (default "")
-  VODFS_HYDRATE_TZ        IANA tz for the times (default America/Chicago)
+  VODFS_HYDRATE_CONCURRENCY  parallel get_vod_info fetches; 0 disables (default 8)
+  VODFS_HYDRATE_ON_LOAD      "true" => full pass when the server starts (default true)
+  VODFS_HYDRATE_TIMES        comma-separated HHMM, e.g. "0300,1500" (default "")
+  VODFS_HYDRATE_TZ           IANA tz for the times (default America/Chicago)
+  VODFS_HYDRATE_MAX_MINUTES  cap one pass to this many minutes (default 240; 0=off)
 """
 import os
 import time
@@ -35,7 +36,10 @@ def _parse_times(raw):
 
 class Hydrator:
     def __init__(self):
-        self.rate = max(0.0, float(os.environ.get("VODFS_HYDRATE_RATE", "0") or 0))
+        # Parallel get_vod_info fetches. The work is network-bound (~0.5s/round-trip),
+        # so concurrency — not a per-second rate — is what determines throughput.
+        # 0 disables hydration. This is also the provider-load throttle (N in flight).
+        self.concurrency = max(0, int(os.environ.get("VODFS_HYDRATE_CONCURRENCY", "8") or 0))
         self.on_load = os.environ.get("VODFS_HYDRATE_ON_LOAD", "true").lower() == "true"
         self.times = _parse_times(os.environ.get("VODFS_HYDRATE_TIMES", ""))
         self.tz = os.environ.get("VODFS_HYDRATE_TZ", "America/Chicago")
@@ -53,8 +57,8 @@ class Hydrator:
 
     # --- lifecycle ---------------------------------------------------------------
     def start(self):
-        if self.rate <= 0:
-            logger.info("Hydration disabled (rate=0)")
+        if self.concurrency <= 0:
+            logger.info("Hydration disabled (concurrency=0)")
             return
         with self._lock:
             if self._thread and self._thread.is_alive():
@@ -63,8 +67,8 @@ class Hydrator:
             self._thread = threading.Thread(target=self._loop, daemon=True,
                                             name="vodfs-hydrator")
             self._thread.start()
-            logger.info("Hydrator started: rate=%s/s on_load=%s times=%s tz=%s",
-                        self.rate, self.on_load, self.times, self.tz)
+            logger.info("Hydrator started: concurrency=%s on_load=%s times=%s tz=%s",
+                        self.concurrency, self.on_load, self.times, self.tz)
 
     def stop(self):
         self._stop.set()
@@ -72,7 +76,7 @@ class Hydrator:
 
     def trigger_now(self):
         """Request an immediate pass (used by the 'Hydrate Now' action)."""
-        if self.rate <= 0:
+        if self.concurrency <= 0:
             return False
         self.start()                      # ensure the thread exists
         self._run_now.set()
@@ -86,9 +90,9 @@ class Hydrator:
             last = {"reason": reason, "at": datetime.datetime.utcfromtimestamp(ts)
                     .replace(microsecond=0).isoformat() + "Z", "movies": nm, "series": ns}
         return {
-            "enabled": self.rate > 0,
+            "enabled": self.concurrency > 0,
             "running": self._running,
-            "rate_per_sec": self.rate,
+            "concurrency": self.concurrency,
             "scheduled_times": ["%02d%02d" % t for t in self.times],
             "timezone": self.tz,
             "next_run": nxt,
@@ -164,10 +168,6 @@ class Hydrator:
         return self._stop.is_set() or (
             self._deadline is not None and time.time() >= self._deadline)
 
-    def _sleep(self):
-        # pace to the configured rate; interruptible by stop
-        self._stop.wait(timeout=1.0 / self.rate if self.rate else 1.0)
-
     def _drip_movies(self):
         try:
             from apps.vod.models import M3UMovieRelation
@@ -184,17 +184,48 @@ class Hydrator:
         all_ids = set(base.values_list("id", flat=True))
         sized = set(base.filter(**_MOVIE_SIZED).values_list("id", flat=True))
         todo = sorted(all_ids - sized)          # set-diff: JSON exclude() misses nulls
-        n = 0
-        for rid in todo:
-            if self._expired():
-                break
+
+        def one(rid):
+            from django.db import close_old_connections
+            close_old_connections()
             try:
                 refresh_movie_advanced_data(rid)   # self-throttled to 24h by Dispatcharr
-                n += 1
+                return 1
+            finally:
+                close_old_connections()
+        return self._parallel(todo, one)
+
+    def _parallel(self, items, work_one):
+        """Run work_one(item) over items with bounded concurrency, deadline-aware.
+
+        The work is network-bound (one get_vod_info round-trip each), so N in flight
+        gives ~N x the throughput of a serial loop. ``concurrency`` is both the speed
+        knob and the provider-load cap (never more than N requests outstanding).
+        Returns the summed count work_one reports."""
+        from concurrent.futures import ThreadPoolExecutor
+        done = [0]
+        lock = threading.Lock()
+
+        def run(item):
+            if self._expired():
+                return
+            try:
+                k = work_one(item)
+                if k:
+                    with lock:
+                        done[0] += k
             except Exception:
-                logger.debug("movie refresh failed for %s", rid, exc_info=True)
-            self._sleep()
-        return n
+                logger.debug("hydration item failed", exc_info=True)
+
+        if not items:
+            return 0
+        chunk = max(1, self.concurrency * 4)
+        with ThreadPoolExecutor(max_workers=self.concurrency) as ex:
+            for i in range(0, len(items), chunk):
+                if self._expired():
+                    break
+                list(ex.map(run, items[i:i + chunk]))   # bounded in-flight per chunk
+        return done[0]
 
     def _drip_series(self):
         try:
@@ -215,16 +246,18 @@ class Hydrator:
         by_account = {}
         for acct_id, sid in rels:
             by_account.setdefault(acct_id, []).append(sid)
-        n = 0
+        tasks = []
         for acct_id, sids in by_account.items():
-            for i in range(0, len(sids), 50):     # small chunks, paced
-                if self._expired():
-                    return n
-                chunk = sids[i:i + 50]
-                try:
-                    batch_refresh_series_episodes(acct_id, chunk)
-                    n += len(chunk)
-                except Exception:
-                    logger.debug("series batch failed acct=%s", acct_id, exc_info=True)
-                self._sleep()
-        return n
+            for i in range(0, len(sids), 50):     # 50-series batch calls
+                tasks.append((acct_id, sids[i:i + 50]))
+
+        def one(t):
+            acct_id, chunk = t
+            from django.db import close_old_connections
+            close_old_connections()
+            try:
+                batch_refresh_series_episodes(acct_id, chunk)
+                return len(chunk)
+            finally:
+                close_old_connections()
+        return self._parallel(tasks, one)
