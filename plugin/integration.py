@@ -416,15 +416,15 @@ def estimate_size(duration_secs: Optional[int]) -> int:
     return 2 * 1024 * 1024 * 1024  # 2 GiB fallback so clients never see a 0-byte file
 
 
-def size_from_metadata(custom_properties, duration_secs: Optional[int] = None) -> int:
-    """Best size from Dispatcharr's own stored provider metadata — no provider probe.
+def size_from_bitrate(custom_properties, duration_secs: Optional[int] = None) -> Optional[int]:
+    """Exact size from Dispatcharr's stored provider bitrate, or None if unavailable.
 
-    Xtream ``get_vod_info`` detail carries an average ``bitrate`` (kbps) and duration;
+    Xtream ``get_vod_info`` detail carries an average ``bitrate`` (kbps) + duration;
     where present (the title's detailed info has been fetched in Dispatcharr),
-    bitrate*duration is the same number a probe would return. Falls back to the
-    duration-based estimate, then the fixed fallback. This keeps sizes accurate
-    without ever contacting the provider — run Dispatcharr's VOD info refresh to
-    populate bitrate library-wide."""
+    bitrate*duration equals what a probe returns — exact, with no provider contact.
+    Returns None when there's no usable bitrate so the caller can fall through to a
+    probe (the real size is mandatory: an undersized estimate truncates the file and
+    makes it unplayable)."""
     cp = custom_properties or {}
     if not isinstance(cp, dict):
         try:
@@ -440,18 +440,26 @@ def size_from_metadata(custom_properties, duration_secs: Optional[int] = None) -
             br = dur = 0
         if 100 <= br <= 200_000 and dur > 0:   # sane kbps; *1000/8 -> bytes
             return br * 125 * dur
-    return estimate_size(duration_secs)
+    return None
+
+
+def size_from_metadata(custom_properties, duration_secs: Optional[int] = None) -> int:
+    """Bitrate-derived exact size if available, else the duration estimate. No probe —
+    used for directory listings (cosmetic; rclone re-HEADs each file for the real size)."""
+    return size_from_bitrate(custom_properties, duration_secs) or estimate_size(duration_secs)
 
 
 # --- accurate size probing ------------------------------------------------------
-# Plex seeks/analyses by byte range, so it CAN use the real file size. The native
-# proxy reports it via Content-Range, and also reports it at actual playback (206),
-# so a duration-based estimate is enough pre-playback. Probing is therefore OFF by
-# default: at scale, probing every file during a Plex scan means one upstream
-# request per title (10k titles -> 10k provider hits, back-to-back), which risks
-# the provider flagging the account/IP. Set VODFS_PROBE_SIZE=true to opt back in
-# (bounded by VODFS_PROBE_CONCURRENCY); pair with a small library or it will hammer.
-_PROBE_ENABLED = os.environ.get("VODFS_PROBE_SIZE", "false").lower() == "true"
+# The real byte size is MANDATORY for playback: rclone caps reads at the size we
+# report, so an undersized estimate truncates the container and Plex sees "no video
+# or audio stream" (file unplayable). We therefore probe the native proxy for the
+# true size (Content-Range) when Dispatcharr has no stored bitrate to derive it from.
+# Probing is ON by default. To avoid one upstream request per title during a scan,
+# either run Dispatcharr's VOD detailed-info refresh (populates bitrate -> exact size
+# with no probe) or set a per-provider max-connections cap. Results are cached, and
+# VODFS_PROBE_CONCURRENCY bounds concurrent probes. Set VODFS_PROBE_SIZE=false only if
+# every title already has bitrate metadata.
+_PROBE_ENABLED = os.environ.get("VODFS_PROBE_SIZE", "true").lower() == "true"
 _size_cache: Dict[str, int] = {}
 _size_cache_lock = threading.Lock()
 _probe_sem = threading.Semaphore(int(os.environ.get("VODFS_PROBE_CONCURRENCY", "4")))

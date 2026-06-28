@@ -19,12 +19,12 @@ from typing import List, Optional, Dict
 try:
     from .integration import (
         DispatcharrIntegrator, parse_title, estimate_size, probe_real_size,
-        size_from_metadata,
+        size_from_metadata, size_from_bitrate,
     )
 except ImportError:
     from integration import (
         DispatcharrIntegrator, parse_title, estimate_size, probe_real_size,
-        size_from_metadata,
+        size_from_metadata, size_from_bitrate,
     )
 
 logger = logging.getLogger(__name__)
@@ -324,11 +324,19 @@ class VirtualTree:
 
     @staticmethod
     def _match_by_title(model, title: str, year: Optional[int]):
-        """Best-effort title match for items lacking external IDs."""
+        """Best-effort title match for items lacking external IDs.
+
+        Filters candidates by the most *distinctive* word in the title (longest, not
+        the first) — searching by "The" matches thousands and the real title can fall
+        outside the candidate cap, so descent into a no-tmdb folder would 404. The
+        provider name carries the cleaned title's words even amid junk, so the longest
+        word is a reliable, selective probe.
+        """
         if not title:
             return None
-        first_word = title.split(' ', 1)[0]
-        candidates = model.objects.filter(name__icontains=first_word)[:200]
+        words = [w for w in re.findall(r"[A-Za-z0-9]+", title) if len(w) >= 3]
+        search = max(words, key=len) if words else title[:12]
+        candidates = list(model.objects.filter(name__icontains=search)[:400])
         for obj in candidates:
             p = parse_title(obj.name, getattr(obj, 'year', None))
             if p['title'].lower() == title.lower() and (year is None or p['year'] == year):
@@ -396,8 +404,11 @@ class VirtualTree:
                 if not rel:
                     return None
                 uuid = str(rel.movie.uuid)
-                size = (probe_real_size("movie", uuid, stream_id)
-                        or size_from_metadata(rel.custom_properties, rel.movie.duration_secs))
+                # Exact size is mandatory (undersized -> truncated -> unplayable):
+                # stored bitrate (free) -> proxy probe -> duration estimate (last resort).
+                size = (size_from_bitrate(rel.custom_properties, rel.movie.duration_secs)
+                        or probe_real_size("movie", uuid, stream_id)
+                        or estimate_size(rel.movie.duration_secs))
                 url = self._integrator.get_proxy_url("movie", uuid, stream_id)
                 return FileNode(filename, url, size)
             else:
@@ -410,8 +421,9 @@ class VirtualTree:
                 if not rel:
                     return None
                 uuid = str(rel.episode.uuid)
-                size = (probe_real_size("episode", uuid, stream_id)
-                        or size_from_metadata(rel.custom_properties, rel.episode.duration_secs))
+                size = (size_from_bitrate(rel.custom_properties, rel.episode.duration_secs)
+                        or probe_real_size("episode", uuid, stream_id)
+                        or estimate_size(rel.episode.duration_secs))
                 url = self._integrator.get_proxy_url("episode", uuid, stream_id)
                 return FileNode(filename, url, size)
         except Exception:
