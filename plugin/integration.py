@@ -416,30 +416,43 @@ def estimate_size(duration_secs: Optional[int]) -> int:
     return 2 * 1024 * 1024 * 1024  # 2 GiB fallback so clients never see a 0-byte file
 
 
-def size_from_bitrate(custom_properties, duration_secs: Optional[int] = None) -> Optional[int]:
-    """Exact size from Dispatcharr's stored provider bitrate, or None if unavailable.
-
-    Xtream ``get_vod_info`` detail carries an average ``bitrate`` (kbps) + duration;
-    where present (the title's detailed info has been fetched in Dispatcharr),
-    bitrate*duration equals what a probe returns — exact, with no provider contact.
-    Returns None when there's no usable bitrate so the caller can fall through to a
-    probe (the real size is mandatory: an undersized estimate truncates the file and
-    makes it unplayable)."""
+def _provider_info_block(custom_properties) -> dict:
+    """The provider 'info' block carrying overall bitrate + duration, normalising the
+    two Dispatcharr shapes: movies store it at ``detailed_info`` (fetched on demand),
+    episodes at ``info.info`` (populated during series hydration)."""
     cp = custom_properties or {}
     if not isinstance(cp, dict):
         try:
             cp = json.loads(cp)
         except (ValueError, TypeError):
-            cp = {}
-    info = cp.get('detailed_info')
-    if isinstance(info, dict):
-        try:
-            br = int(info.get('bitrate') or 0)
-            dur = int(info.get('duration_secs') or duration_secs or 0)
-        except (ValueError, TypeError):
-            br = dur = 0
-        if 100 <= br <= 200_000 and dur > 0:   # sane kbps; *1000/8 -> bytes
-            return br * 125 * dur
+            return {}
+    di = cp.get('detailed_info')
+    if isinstance(di, dict) and ('bitrate' in di or 'video' in di):
+        return di
+    inner = cp.get('info')
+    inner = inner.get('info') if isinstance(inner, dict) else None
+    return inner if isinstance(inner, dict) else {}
+
+
+def size_from_bitrate(custom_properties, duration_secs: Optional[int] = None) -> Optional[int]:
+    """Exact-ish size from Dispatcharr's stored provider metadata, or None if absent.
+
+    Uses the *overall* ``bitrate`` (kbps) * duration — the whole-file rate, matched a
+    real probe to 0.002% on a 4K title. (We deliberately ignore video.tags
+    NUMBER_OF_BYTES: that's the video stream alone and would under-report the file,
+    truncating it.) Handles both the movie (detailed_info) and episode (info.info)
+    shapes. Returns None when there's no usable bitrate so the caller can fall through
+    — an undersized estimate truncates the file and makes it unplayable."""
+    info = _provider_info_block(custom_properties)
+    if not info:
+        return None
+    try:
+        br = int(info.get('bitrate') or 0)
+        dur = int(info.get('duration_secs') or duration_secs or 0)
+    except (ValueError, TypeError):
+        br = dur = 0
+    if 100 <= br <= 200_000 and dur > 0:   # sane kbps; *1000/8 -> bytes
+        return br * 125 * dur
     return None
 
 
