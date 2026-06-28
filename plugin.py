@@ -102,27 +102,28 @@ class Plugin:
             return _json.loads(r.read().decode() or "{}")
 
     def _run_hydration_now(self, settings: Dict[str, Any]) -> Dict[str, Any]:
+        # Raise (not return) on failure: Dispatcharr only shows a red notification when
+        # the action raises — a returned {"status": "error"} still renders green.
         if not self._is_running(self._read_pid()):
-            return {"status": "error", "message": "Server not running — click 🚀 Enable first."}
+            raise RuntimeError("Server not running — click 🚀 Enable first.")
         try:
             d = self._child(settings, "/hydrate/run", method="POST")
         except Exception as e:
-            return {"status": "error", "message": f"Could not reach server: {e}"}
+            raise RuntimeError(f"Could not reach the VODFS server: {e}")
         st = d.get("status", {})
         if not d.get("triggered"):
-            return {"status": "ok", "message": "Hydration is disabled — set 'Hydration Rate' above 0 and re-enable."}
+            return {"status": "ok", "message": "Hydration is disabled — set Hydration Concurrency above 0 and re-enable."}
         return {"status": "ok", "message":
-                f"Hydration pass started at {st.get('rate_per_sec')}/sec. Titles appear as sizes land — "
-                f"watch progress at /vodfs/stats or click 🩺 Status."}
+                f"Hydration started ({st.get('concurrency')} parallel fetches). Titles appear as sizes land — "
+                f"watch /vodfs/stats or click 🩺 Status."}
 
     def _check_status(self, settings: Dict[str, Any]) -> Dict[str, Any]:
         if not self._is_running(self._read_pid()):
-            # If it's down because the web deps never installed, scream red with the
-            # exact fix instead of the calm "click Enable" — Enable will just fail again.
+            # If it's down because the web deps never installed, raise so the UI goes
+            # red with the exact fix instead of the calm "click Enable" (which fails again).
             missing = self._missing_dependencies(self._PYTHON_EXE)
             if missing:
-                return {"status": "error",
-                        "message": self._dep_red_alert(self._PYTHON_EXE, missing)}
+                raise RuntimeError(self._dep_red_alert(self._PYTHON_EXE, missing))
             return {"status": "ok", "message": "Server is STOPPED. Click 🚀 Enable to start."}
         try:
             stats = self._child(settings, "/stats")
@@ -144,7 +145,7 @@ class Plugin:
                 lp = hy["last_pass"]
                 lines.append(f"Last pass ({lp.get('reason')}): {lp.get('movies')} movies, {lp.get('series')} series.")
         else:
-            lines.append("Hydration: disabled (rate=0).")
+            lines.append("Hydration: disabled (concurrency=0).")
         gap = (mv.get('total', 0) or 0) - (mv.get('sized', 0) or 0)
         if gap > 0:
             lines.append(f"Next step: {gap} movies still need sizes — click 💧 Hydrate Now.")
@@ -174,9 +175,12 @@ class Plugin:
             return None
 
     def _dep_red_alert(self, python_exe: str, missing, pip_error: str | None = None) -> str:
-        """A loud, copy-pasteable remediation banner for missing web deps.
+        """A concise remediation message for missing web deps.
 
-        Includes THIS container's name so the docker exec line is runnable as-is."""
+        Raised by Enable/Status, so it shows as a red notification. The UI collapses
+        newlines/whitespace, so this is one clean flowing line (not an ASCII banner)
+        with a single copy/paste command. The container name is filled from the
+        running hostname so the `docker exec` line is runnable as-is."""
         import socket
         try:
             host = socket.gethostname()          # in-container = container id, usable by `docker exec`
@@ -184,30 +188,21 @@ class Plugin:
             host = "<dispatcharr-container>"
         miss = " ".join(missing) if missing else " ".join(self._DEPENDENCIES)
         pkgs = " ".join(self._DEPENDENCIES)
-        lines = [
-            "🟥🟥🟥 VODFS IS DOWN — PYTHON DEPENDENCIES NOT INSTALLED 🟥🟥🟥",
-            "",
-            f"Missing from Dispatcharr's Python ({python_exe}): {miss}",
-            "Automatic `pip install` did NOT succeed, so the HTTP filesystem server",
-            "CANNOT start. Nothing works until these three packages are installed.",
-            "",
-            "━━━━━━━━━━ FIX IT (copy / paste) ━━━━━━━━━━",
-            "",
-            "① From the Docker HOST — one shot:",
-            f"   docker exec {host} {python_exe} -m pip install {pkgs}",
-            "",
-            "② If pip itself is missing, bootstrap it first, then install:",
-            f"   docker exec {host} {python_exe} -m ensurepip --upgrade",
-            f"   docker exec {host} {python_exe} -m pip install {pkgs}",
-            "",
-            "③ Already inside the container? Drop the `docker exec ...` prefix:",
-            f"   {python_exe} -m pip install {pkgs}",
-            "",
-            "Then click 🚀 Enable again — Status will go green once it imports.",
-        ]
+        why = ""
         if pip_error:
-            lines += ["", "── pip said ──", pip_error.strip()[-700:]]
-        return "\n".join(lines)
+            errlines = [l.strip() for l in pip_error.strip().splitlines() if l.strip()]
+            pick = next((l for l in reversed(errlines) if l.lower().startswith("error")),
+                        errlines[-1] if errlines else "")
+            if pick:
+                why = f" (pip: {pick[:160]})"
+        return (
+            f"VODFS can't start — required Python packages are missing: {miss}. "
+            f"The automatic install into {python_exe} failed{why}. "
+            f"Fix it on your Docker host, then click Enable again:  "
+            f"docker exec {host} {python_exe} -m pip install {pkgs}  "
+            f"— if pip itself is missing, run 'docker exec {host} {python_exe} -m ensurepip --upgrade' first. "
+            f"See the plugin's “Won't start?” section for details."
+        )
 
     def _ensure_dependencies(self, python_exe: str, logger: logging.Logger) -> str | None:
         """Install uvicorn/fastapi/jinja2 into Dispatcharr's venv.
@@ -310,7 +305,7 @@ class Plugin:
         dep_error = self._ensure_dependencies(python_exe, logger)
         if dep_error:
             logger.error(dep_error)
-            return {"status": "error", "message": dep_error}
+            raise RuntimeError(dep_error)   # raise => red notification (a returned error renders green)
 
         cmd = [
             python_exe, runner_path,

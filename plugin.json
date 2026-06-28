@@ -10,15 +10,15 @@
   "fields": [
     {
       "id": "_setup",
-      "label": "📋 Getting started",
+      "label": "🚀 Quick Start",
       "type": "info",
-      "description": "1) Click 🚀 Enable. 2) Click 📋 rclone Config and follow it (it links to /vodfs/rclone_conf on this host). 3) Point Plex at /mnt/vodfs/Movies/<Category> (per-category, not /All). 4) Click 💧 Hydrate Now — titles appear as Dispatcharr fetches their size. 5) Click 🩺 Status anytime to see progress. Tip: open /vodfs/ in a browser to inspect the filesystem."
+      "description": "Five clicks: 1) 🚀 Enable. 2) 📋 rclone Config, and follow the page it links to. 3) Point Plex at /mnt/vodfs/Movies/<Category> (per category, not /All). 4) 💧 Hydrate Now — titles appear as their sizes land. 5) 🩺 Status anytime for progress. Tip: open /vodfs/ in a browser to inspect the filesystem."
     },
     {
       "id": "_dependencies",
-      "label": "🛠 If it won't start (dependencies)",
+      "label": "🛠 Won't start?",
       "type": "info",
-      "description": "The HTTP server needs three Python packages that are not in Dispatcharr's base image: uvicorn, fastapi, jinja2. The plugin tries to pip-install them automatically on Enable. If that fails, Status turns RED and shows the exact fix. To install them by hand, run this on your Docker host (replace the container name with your Dispatcharr container):  docker exec <dispatcharr-container> /dispatcharrpy/bin/python -m pip install uvicorn fastapi jinja2  — if pip itself is missing, first run:  docker exec <dispatcharr-container> /dispatcharrpy/bin/python -m ensurepip --upgrade  — then click 🚀 Enable again. Note: these get wiped if the Dispatcharr container is recreated (image update), so you may need to re-run them after an update."
+      "description": "The server needs three Python packages that aren't in Dispatcharr's image: uvicorn, fastapi, jinja2. VODFS installs them automatically on Enable. If that ever fails, Enable turns red with the exact pip command to run on your Docker host. You may need to re-run it after a Dispatcharr update recreates the container."
     },
     {
       "id": "http_port",
@@ -45,9 +45,9 @@
     },
     {
       "id": "_hydration",
-      "label": "⏰ Hydration (size backfill)",
+      "label": "⏰ Hydration",
       "type": "info",
-      "description": "vodfs only shows titles whose size Dispatcharr already knows (stored bitrate). Hydration fetches that over time — movie detail + un-hydrated series — paced so the provider is never hammered. It runs a full pass on enable (if enabled below), then at the scheduled times. Pin it off-peak (e.g. 3am) so it never runs while you're watching. ⚠️ DON'T expose your whole provider: a 100k-title library is ~3h of hydration at concurrency 16 (~10/sec) and gets re-hidden on every catalog refresh. Enable VOD in Dispatcharr only for the accounts/categories you actually want, and point Plex at per-category dirs (not /All). Timings & guidance: docs/HYDRATION.md."
+      "description": "VODFS shows only titles whose size Dispatcharr already knows; hydration fetches the rest in the background. It runs on Enable (optional) and at the scheduled times below — pin it off-peak (e.g. 3am) so it never runs while you're watching. Don't expose your whole provider: a 100k-title library is hours of fetching and is re-hidden on every catalog refresh, so enable VOD only for the categories you actually want. Timings and guidance: docs/HYDRATION.md."
     },
     {
       "id": "scheduled_times",
@@ -101,7 +101,7 @@
     {
       "id": "run_hydration_now",
       "label": "Hydrate Now",
-      "description": "Immediately run a hydration pass (backfill movie/series sizes), paced by the rate limit",
+      "description": "Immediately run a hydration pass (backfill movie/series sizes) using parallel fetches",
       "button_label": "💧 Hydrate Now",
       "button_variant": "filled",
       "button_color": "blue"
