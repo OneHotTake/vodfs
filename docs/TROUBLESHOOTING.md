@@ -11,6 +11,10 @@ The plugin enable action returns an error or the port never opens. Things to che
 3. **Permissions.** `/data/plugins/vodfs/` needs to be writable by whatever user Dispatcharr runs as.
 4. **Child crashed on startup.** `tail` the server log at `/data/plugins/vodfs/server.log`. The most common failure here is a Django import error caused by running against an incompatible Dispatcharr version.
 
+## 500s / `gevent LoopExit` Under Load
+
+A single `ls` works but a Plex or rclone scan throws `500`s, with `gevent LoopExit: This operation would block forever` in the server log. This means the child is still on Dispatcharr's gevent connection-pool DB backend, which can't run in the plugin's asyncio + thread-pool server. `standalone_runner._use_blocking_db_backend` is supposed to swap it for blocking psycopg3 at startup; confirm the startup log line `Standalone DB backend set to standard blocking psycopg3` is present. If it isn't, the swap's `ENGINE` match didn't fire for your Dispatcharr build — that's the place to look.
+
 ## rclone Connection Refused
 
 The server is up (you can `curl` it from the Dispatcharr host) but rclone on a different host can't connect. Two cases:
@@ -20,15 +24,16 @@ The server is up (you can `curl` it from the Dispatcharr host) but rclone on a d
 
 ## Empty Directories
 
-`/Movies/All/` and `/Series/All/` return nothing. Verify directly against the plugin:
+`/Movies/All/` and `/Series/All/` return nothing. The fastest check is `/stats`, which returns per-category counts of exactly what VODFS can see (using the same enabled-category/same-account predicate as the listings):
 
 ```bash
+curl http://127.0.0.1:8888/stats
 curl http://127.0.0.1:8888/Movies/
 curl http://127.0.0.1:8888/Movies/All/
 curl http://127.0.0.1:8888/Series/All/
 ```
 
-If those are also empty, the data isn't there yet. Check in Dispatcharr that:
+If `/stats` reports zeros (and the listings are also empty), the data isn't there yet. Check in Dispatcharr that:
 
 - VOD content is loaded for at least one M3U account.
 - At least one VOD category is enabled.
