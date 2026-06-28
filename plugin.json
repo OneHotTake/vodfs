@@ -41,7 +41,7 @@
       "id": "_hydration",
       "label": "⏰ Hydration (size backfill)",
       "type": "info",
-      "description": "vodfs only shows titles whose size Dispatcharr already knows (stored bitrate). Hydration fetches that over time — movie detail + un-hydrated series — paced so the provider is never hammered. It runs a full pass on enable (if enabled below), then at the scheduled times. Pin it off-peak (e.g. 3am) so it never runs while you're watching."
+      "description": "vodfs only shows titles whose size Dispatcharr already knows (stored bitrate). Hydration fetches that over time — movie detail + un-hydrated series — paced so the provider is never hammered. It runs a full pass on enable (if enabled below), then at the scheduled times. Pin it off-peak (e.g. 3am) so it never runs while you're watching. ⚠️ DON'T expose your whole provider: a 100k-title library is ~3h of hydration at concurrency 16 (~10/sec) and gets re-hidden on every catalog refresh. Enable VOD in Dispatcharr only for the accounts/categories you actually want, and point Plex at per-category dirs (not /All). Timings & guidance: docs/HYDRATION.md."
     },
     {
       "id": "scheduled_times",
