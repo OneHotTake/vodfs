@@ -69,6 +69,17 @@ _LANG_MAP = {
     'LAT': 'es', 'SE': 'sv', 'DK': 'da', 'GR': 'el', 'CZ': 'cs',
 }
 _YEAR_RE = re.compile(r'(?:^|[^\d])((?:19|20)\d{2})(?:[^\d]|$)')
+# A *parenthesised/bracketed* year is the canonical release marker. Anything after
+# the first one is provider junk (duplicate years, cast credits) we truncate away.
+_PAREN_YEAR_RE = re.compile(r'[(\[]\s*((?:19|20)\d{2})\s*[)\]]')
+# Resolution/codec/source tokens that providers wedge mid-title. Deliberately a
+# *narrower* set than _QUAL: ambiguous real-word codes (MAX, HBO, CAM, WEB, TS, DV)
+# are excluded so titles like "Mad Max" survive an inline strip.
+_QUAL_INLINE = {
+    '4K', 'UHD', 'FHD', 'QHD', 'HDR', 'HDR10', 'HEVC', 'H265', 'X265', 'H264',
+    'X264', 'XVID', '1080P', '720P', '2160P', '480P', '4320P', 'HDTS', 'HDCAM',
+    'WEBDL', 'WEBRIP', 'BRRIP', 'BLURAY', 'DVDRIP', 'REMUX',
+}
 _TAG_RE = re.compile(
     r'[\[(]\s*(?:MULTI[- ]?SUB|MULTISUB|SUB|DUAL|VOST(?:FR|E)?|HDTS|HDCAM|CAM|HDR|'
     r'HEVC|MAIN CARD|PRELIMS|EARLY PRELIMS|UNCUT|EXTENDED|REMASTERED|IMAX|3D|REPACK|'
@@ -161,12 +172,22 @@ def parse_title(raw: str, year_field: Any = None) -> Dict[str, Any]:
     if ' ' not in name and name.count('.') >= 2:  # dotted release name
         name = name.replace('.', ' ')
     name_before_year = name
-    matches = _YEAR_RE.findall(name)
-    if year is None and matches:
-        year = int(matches[-1])
-    work = name
-    if matches:  # remove the year token wherever it sits
-        work = re.sub(r'[\(\[]?\b' + matches[-1] + r'\b[\)\]]?', ' ', name)
+    paren = _PAREN_YEAR_RE.search(name)
+    if paren:
+        # Truncate at the first parenthesised year so "Cool Hand Luke 4K (1967)
+        # PAUL NEWMAN (1967)" yields "Cool Hand Luke" rather than a folder name
+        # scrapers can't match. A bare year that is part of the title (e.g.
+        # "Blade Runner 2049") sits before the paren and is preserved.
+        if year is None:
+            year = int(paren.group(1))
+        work = name[:paren.start()]
+    else:
+        matches = _YEAR_RE.findall(name)
+        if year is None and matches:
+            year = int(matches[-1])
+        work = name
+        if matches:  # remove the bare year token wherever it sits
+            work = re.sub(r'[\(\[]?\b' + matches[-1] + r'\b[\)\]]?', ' ', name)
 
     work = _finalize(work)
     if not work:
@@ -181,10 +202,22 @@ def parse_title(raw: str, year_field: Any = None) -> Dict[str, Any]:
             'audio': audio_langs, 'subs': sub_langs, 'dubbed': dubbed, 'multi': multi}
 
 
+def _strip_inline_quality(name: str) -> str:
+    """Drop standalone resolution/codec/source tokens (4K, 1080p, HEVC, BluRay) that
+    providers leave inside a title. Only unambiguous tokens in _QUAL_INLINE are
+    removed, so real-word codes (Max, HBO, Cam) stay put."""
+    return re.sub(
+        r'\b[A-Za-z0-9]{2,7}\b',
+        lambda m: ' ' if m.group(0).upper() in _QUAL_INLINE else m.group(0),
+        name,
+    )
+
+
 def _finalize(name: str) -> str:
     """Strip junk tags, bracket groups, trailing country codes; collapse whitespace."""
     name = _TAG_RE.sub(' ', name)
     name = re.sub(r'\[[^\]]*\]', ' ', name)                  # all [tag] groups
+    name = _strip_inline_quality(name)                       # mid-title 4K/1080p/...
     name = re.sub(r'\s*\((?:[A-Za-z]{2})\)\s*$', ' ', name)  # trailing country code
     name = re.sub(r'[\[(]\s*[\])]', ' ', name)               # empty brackets
     return re.sub(r'\s+', ' ', name).strip(' -._')
@@ -333,6 +366,7 @@ class DispatcharrIntegrator:
                 series_relation__series=series,
                 series_relation__category__m3u_relations__enabled=True,
                 series_relation__category__m3u_relations__m3u_account=F("m3u_account"),
+                m3u_account__is_active=True,
             ).select_related('episode', 'm3u_account', 'series_relation',
                              'series_relation__category').distinct()
             for rel in relations:

@@ -107,6 +107,26 @@ class Plugin:
         except Exception as e:
             logger.warning("Could not verify/install dependencies (%s); continuing", e)
 
+    @staticmethod
+    def _validate_base_url(url: str) -> str | None:
+        """Return an error string if the Dispatcharr base URL is unusable, else None.
+
+        Note this is reachability-agnostic: 127.0.0.1 is a valid default for
+        same-host setups. We only catch values that can never produce a working
+        redirect (empty, no scheme, non-HTTP scheme, or no host).
+        """
+        from urllib.parse import urlparse
+        value = (url or "").strip()
+        if not value:
+            return "Dispatcharr base URL is empty — set it in the plugin settings."
+        parsed = urlparse(value)
+        if parsed.scheme not in ("http", "https"):
+            return ("Dispatcharr base URL must start with http:// or https:// "
+                    f"(got {value!r}).")
+        if not parsed.netloc:
+            return f"Dispatcharr base URL has no host (got {value!r})."
+        return None
+
     def _enable(self, logger: logging.Logger, settings: Dict[str, Any]) -> Dict[str, Any]:
         """Enable the plugin and start child process"""
         # Check if already running
@@ -122,6 +142,14 @@ class Plugin:
         port = settings.get("http_port", 8888)
         dispatcharr_base_url = settings.get("dispatcharr_base_url", "http://127.0.0.1:9191")
         enable_auth = settings.get("enable_auth", False)
+
+        # Reject an obviously-broken base URL up front. Every playback request 302s
+        # to this address, so starting with a malformed value just yields dead
+        # redirects that surface much later as unplayable files in Plex/rclone.
+        url_error = self._validate_base_url(dispatcharr_base_url)
+        if url_error:
+            logger.error("Refusing to start: %s", url_error)
+            return {"status": "error", "message": url_error}
 
         logger.info("Starting HTTP filesystem server on port %d (auth: %s)", port, "enabled" if enable_auth else "disabled")
 

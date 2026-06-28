@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Robustness pass informed by a comparison against the VOD2MLIB plugin — adopting the fixes that apply to our live-query/302 model, while deliberately skipping its push-to-disk machinery (`.strm`/`.nfo` files, cron rescans, on-disk URL persistence) that our architecture doesn't need.
+
+### Added
+- **Unit test suite** (`tests/`, 50 pure-helper tests, ~0.2s) covering provider-name parsing, Plex naming, external-ID formatting, filename sanitisation, path-resolution regexes, and base-URL validation — no Django/DB required. Run with `python3 -m pytest tests/`.
+- **Orphaned-content counts in `/stats`** — reports movies/series hidden because their provider account is inactive, so a sudden drop in visible counts is explainable.
+
+### Fixed
+- **Dead redirects from deactivated providers.** Listings and file resolution now require `m3u_account__is_active=True`, so content from a provider deactivated in Dispatcharr (whose category relations were still enabled) no longer surfaces as files that 302 to a dead proxy.
+- **Title junk after a duplicated year.** `parse_title` now truncates at the first *parenthesised* year and strips inline resolution/codec tokens, so `Cool Hand Luke 4K (1967) PAUL NEWMAN (1967)` becomes `Cool Hand Luke (1967)`. A bare year that is part of the title (`Blade Runner 2049`) is preserved, and real-word codes (`Max`, `HBO`) are never stripped.
+
+### Changed
+- Enabling the plugin now validates the Dispatcharr base URL (scheme + host) up front and refuses to start on a malformed value, instead of serving dead redirects discovered much later.
+
 ## [0.42.0] — 2026-06-28
 
 First production release. Verified end-to-end against Dispatcharr 0.27.1 with a live library (3,000+ movies, ~180 series, ~3,000 episodes): rclone mount → Plex match (TMDB/IMDB) → seekable playback through the native VOD proxy, validated with Plex, Chromium, and ffmpeg.

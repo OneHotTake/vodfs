@@ -129,6 +129,9 @@ def _query_stats_sync() -> dict:
     except ImportError:
         from tree import _enabled
     enabled = _enabled()
+    # Same predicate but for *inactive* accounts: content that would be listed if
+    # the provider were re-activated. Surfacing it explains a sudden drop in counts.
+    orphaned = dict(enabled, **{"m3u_account__is_active": False})
 
     def per_category(model):
         rows = (
@@ -142,6 +145,9 @@ def _query_stats_sync() -> dict:
     def total(model):
         return model.objects.filter(**enabled).distinct().count()
 
+    def orphaned_total(model):
+        return model.objects.filter(**orphaned).distinct().count()
+
     return {
         "available": True,
         "movies": {
@@ -151,6 +157,10 @@ def _query_stats_sync() -> dict:
         "series": {
             "total": total(M3USeriesRelation),
             "by_category": per_category(M3USeriesRelation),
+        },
+        "orphaned": {
+            "movies": orphaned_total(M3UMovieRelation),
+            "series": orphaned_total(M3USeriesRelation),
         },
     }
 

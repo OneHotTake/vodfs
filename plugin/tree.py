@@ -33,12 +33,16 @@ _IMDB_RE = re.compile(r'\{imdb-(tt\w+)\}')
 _STREAMID_RE = re.compile(r'-\s*([0-9]+)\.[A-Za-z0-9]+$')   # trailing ' - <sid>.ext'
 _SEASON_RE = re.compile(r'^Season\s+(\d{1,3})$', re.IGNORECASE)
 
-# Only enabled categories whose account matches the relation's account.
+# Only enabled categories whose account matches the relation's account, and only
+# while that account is active. Without the is_active gate a deactivated provider
+# whose category relations are still enabled would keep surfacing files that 302
+# to a dead proxy (Dispatcharr stops serving inactive accounts).
 def _enabled(**extra):
     from django.db.models import F
     base = dict(
         category__m3u_relations__enabled=True,
         category__m3u_relations__m3u_account=F("m3u_account"),
+        m3u_account__is_active=True,
     )
     base.update(extra)
     return base
@@ -351,6 +355,7 @@ class VirtualTree:
                 rel = M3UEpisodeRelation.objects.filter(
                     stream_id=stream_id,
                     series_relation__category__m3u_relations__enabled=True,
+                    m3u_account__is_active=True,
                 ).select_related('episode').first()
                 if not rel:
                     return None
