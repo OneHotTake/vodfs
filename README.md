@@ -61,6 +61,8 @@ On Debian/Ubuntu: `sudo apt install rclone fuse3`. To use `--allow-other`, add `
 
 ## Install
 
+> For step-by-step instructions covering every common deployment — native Plex + native rclone, Plex in Docker + rclone in Docker, and the DUMB stack (rclone built-in), each with Jellyfin/Emby notes — see **[`docs/INSTALL.md`](docs/INSTALL.md)**. The summary below is the short version.
+
 1. Install the plugin in Dispatcharr (drop it in the plugins directory or use the plugin manager).
 2. Open the VODFS settings, pick an HTTP port (default `8888`), and set the Dispatcharr Base URL if it isn't reachable on the default.
 3. Click **Enable HTTP Filesystem**.
