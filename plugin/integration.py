@@ -8,6 +8,7 @@ IDs (tmdb/imdb) are emitted one-per-brace as Plex requires.
 
 import os
 import re
+import json
 import logging
 import threading
 import urllib.request
@@ -390,7 +391,7 @@ class DispatcharrIntegrator:
                     "account_name": rel.m3u_account.name if rel.m3u_account else "Unknown",
                     "stream_url": stream_url,
                     "extension": rel.container_extension or "mkv",
-                    "size": estimate_size(episode.duration_secs),
+                    "size": size_from_metadata(rel.custom_properties, episode.duration_secs),
                     "relation": rel,
                 })
             result.append({
@@ -413,6 +414,33 @@ def estimate_size(duration_secs: Optional[int]) -> int:
     if duration_secs and duration_secs > 0:
         return int(duration_secs) * _BYTES_PER_SEC
     return 2 * 1024 * 1024 * 1024  # 2 GiB fallback so clients never see a 0-byte file
+
+
+def size_from_metadata(custom_properties, duration_secs: Optional[int] = None) -> int:
+    """Best size from Dispatcharr's own stored provider metadata — no provider probe.
+
+    Xtream ``get_vod_info`` detail carries an average ``bitrate`` (kbps) and duration;
+    where present (the title's detailed info has been fetched in Dispatcharr),
+    bitrate*duration is the same number a probe would return. Falls back to the
+    duration-based estimate, then the fixed fallback. This keeps sizes accurate
+    without ever contacting the provider — run Dispatcharr's VOD info refresh to
+    populate bitrate library-wide."""
+    cp = custom_properties or {}
+    if not isinstance(cp, dict):
+        try:
+            cp = json.loads(cp)
+        except (ValueError, TypeError):
+            cp = {}
+    info = cp.get('detailed_info')
+    if isinstance(info, dict):
+        try:
+            br = int(info.get('bitrate') or 0)
+            dur = int(info.get('duration_secs') or duration_secs or 0)
+        except (ValueError, TypeError):
+            br = dur = 0
+        if 100 <= br <= 200_000 and dur > 0:   # sane kbps; *1000/8 -> bytes
+            return br * 125 * dur
+    return estimate_size(duration_secs)
 
 
 # --- accurate size probing ------------------------------------------------------

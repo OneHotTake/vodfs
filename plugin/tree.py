@@ -19,10 +19,12 @@ from typing import List, Optional, Dict
 try:
     from .integration import (
         DispatcharrIntegrator, parse_title, estimate_size, probe_real_size,
+        size_from_metadata,
     )
 except ImportError:
     from integration import (
         DispatcharrIntegrator, parse_title, estimate_size, probe_real_size,
+        size_from_metadata,
     )
 
 logger = logging.getLogger(__name__)
@@ -195,7 +197,8 @@ class VirtualTree:
             provider = (rel.m3u_account.name[:24] if (multi and rel.m3u_account) else '')
             fn = self._integrator.movie_filename(movie, rel, provider)
             url = self._integrator.get_proxy_url("movie", str(movie.uuid), rel.stream_id)
-            out.append({'filename': fn, 'size': estimate_size(movie.duration_secs),
+            out.append({'filename': fn,
+                        'size': size_from_metadata(rel.custom_properties, movie.duration_secs),
                         'stream_url': url})
         out.sort(key=lambda e: e['filename'].lower())
         return out
@@ -394,7 +397,7 @@ class VirtualTree:
                     return None
                 uuid = str(rel.movie.uuid)
                 size = (probe_real_size("movie", uuid, stream_id)
-                        or estimate_size(rel.movie.duration_secs))
+                        or size_from_metadata(rel.custom_properties, rel.movie.duration_secs))
                 url = self._integrator.get_proxy_url("movie", uuid, stream_id)
                 return FileNode(filename, url, size)
             else:
@@ -408,7 +411,7 @@ class VirtualTree:
                     return None
                 uuid = str(rel.episode.uuid)
                 size = (probe_real_size("episode", uuid, stream_id)
-                        or estimate_size(rel.episode.duration_secs))
+                        or size_from_metadata(rel.custom_properties, rel.episode.duration_secs))
                 url = self._integrator.get_proxy_url("episode", uuid, stream_id)
                 return FileNode(filename, url, size)
         except Exception:

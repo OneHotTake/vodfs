@@ -124,6 +124,30 @@ def test_episode_display_title_empty_when_only_marker():
 
 # --- size estimation ------------------------------------------------------------
 
+def test_size_from_metadata_uses_db_bitrate():
+    from integration import size_from_metadata
+    cp = {"detailed_info": {"bitrate": 2546, "duration_secs": 6180}}
+    assert size_from_metadata(cp, 6180) == 2546 * 125 * 6180   # kbps*1000/8*secs
+
+
+def test_size_from_metadata_accepts_json_string():
+    from integration import size_from_metadata
+    import json
+    cp = json.dumps({"detailed_info": {"bitrate": 1227, "duration_secs": 3600}})
+    assert size_from_metadata(cp, 3600) == 1227 * 125 * 3600
+
+
+def test_size_from_metadata_falls_back_to_estimate():
+    from integration import size_from_metadata, estimate_size
+    # no bitrate -> duration estimate
+    assert size_from_metadata({"detailed_info": {}}, 1000) == estimate_size(1000)
+    # absurd bitrate -> rejected, estimate
+    assert size_from_metadata({"detailed_info": {"bitrate": 9_000_000}}, 1000) == estimate_size(1000)
+    # junk custom_properties -> estimate
+    assert size_from_metadata("not json", 1000) == estimate_size(1000)
+    assert size_from_metadata(None, 1000) == estimate_size(1000)
+
+
 def test_estimate_size_from_duration():
     assert estimate_size(100) == 100 * (2_000_000 // 8)
 
