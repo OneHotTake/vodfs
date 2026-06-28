@@ -85,8 +85,66 @@ class Plugin:
             return self._disable(logger)
         elif action == "show_rclone_config":
             return self._show_rclone_config(settings)
+        elif action == "run_hydration_now":
+            return self._run_hydration_now(settings)
+        elif action == "check_status":
+            return self._check_status(settings)
         else:
             return {"status": "error", "message": f"Unknown action: {action}"}
+
+    def _child(self, settings, path, method="GET", timeout=15):
+        """Call the child server's own HTTP API (it runs the hydrator + stats)."""
+        import json as _json
+        import urllib.request
+        port = settings.get("http_port", 8888)
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return _json.loads(r.read().decode() or "{}")
+
+    def _run_hydration_now(self, settings: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._is_running(self._read_pid()):
+            return {"status": "error", "message": "Server not running — click 🚀 Enable first."}
+        try:
+            d = self._child(settings, "/hydrate/run", method="POST")
+        except Exception as e:
+            return {"status": "error", "message": f"Could not reach server: {e}"}
+        st = d.get("status", {})
+        if not d.get("triggered"):
+            return {"status": "ok", "message": "Hydration is disabled — set 'Hydration Rate' above 0 and re-enable."}
+        return {"status": "ok", "message":
+                f"Hydration pass started at {st.get('rate_per_sec')}/sec. Titles appear as sizes land — "
+                f"watch progress at /vodfs/stats or click 🩺 Status."}
+
+    def _check_status(self, settings: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._is_running(self._read_pid()):
+            return {"status": "ok", "message": "Server is STOPPED. Click 🚀 Enable to start."}
+        try:
+            stats = self._child(settings, "/stats")
+            hy = self._child(settings, "/hydrate/status")
+        except Exception as e:
+            return {"status": "error", "message": f"Server running but not responding: {e}"}
+        lib = stats.get("library", {})
+        mv, sv = lib.get("movies", {}), lib.get("series", {})
+        lines = [
+            "✅ Server running.",
+            f"Movies visible: {mv.get('sized', '?')} / {mv.get('total', '?')}  "
+            f"(Series: {sv.get('sized', '?')} / {sv.get('total', '?')})",
+        ]
+        if hy.get("enabled"):
+            nxt = hy.get("next_run") or "manual only"
+            run = "running now" if hy.get("running") else f"next run {nxt}"
+            lines.append(f"Hydration: {hy.get('rate_per_sec')}/sec, {run}.")
+            if hy.get("last_pass"):
+                lp = hy["last_pass"]
+                lines.append(f"Last pass ({lp.get('reason')}): {lp.get('movies')} movies, {lp.get('series')} series.")
+        else:
+            lines.append("Hydration: disabled (rate=0).")
+        gap = (mv.get('total', 0) or 0) - (mv.get('sized', 0) or 0)
+        if gap > 0:
+            lines.append(f"Next step: {gap} movies still need sizes — click 💧 Hydrate Now.")
+        else:
+            lines.append("Next step: point Plex at /mnt/vodfs/Movies/<Category>.")
+        return {"status": "ok", "message": "\n".join(lines)}
 
     _DEPENDENCIES = ("uvicorn", "fastapi", "jinja2")
 
@@ -190,6 +248,12 @@ class Plugin:
         # Pass auth enable flag to child process
         env["VODFS_ENABLE_AUTH"] = str(enable_auth).lower()
 
+        # Pass hydration (size-backfill scheduler) settings to the child
+        env["VODFS_HYDRATE_RATE"] = str(settings.get("hydrate_rate", 2))
+        env["VODFS_HYDRATE_ON_LOAD"] = str(settings.get("hydrate_on_load", True)).lower()
+        env["VODFS_HYDRATE_TIMES"] = str(settings.get("scheduled_times", "0300") or "")
+        env["VODFS_HYDRATE_TZ"] = str(settings.get("timezone", "America/Chicago") or "America/Chicago")
+
         try:
             # Redirect child output to log file for debugging
             log_file = os.path.join(plugin_subdir, "server.log")
@@ -249,53 +313,23 @@ class Plugin:
         }
 
     def _show_rclone_config(self, settings: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate rclone configuration"""
-        port = settings.get("http_port", 8888)
-        enable_auth = settings.get("enable_auth", False)
-        config_url = f"http://127.0.0.1:{port}/rclone_conf"
+        """Point the user at the persistent, copy/paste rclone-config page.
 
-        if enable_auth:
-            config = f"""# VODFS rclone remote
-# Paste this block into your rclone.conf file.
-# Suggested mount point: /mnt/vodfs
-# Mount command:
-#   mkdir -p /mnt/vodfs
-#   rclone mount vodfs: /mnt/vodfs --allow-other --vfs-cache-mode off --dir-cache-time 5s --poll-interval 0
-# Plex library paths:
-#   Movies: /mnt/vodfs/Movies/All
-#   Series: /mnt/vodfs/Series/All
-# Secured installs: replace <your-dispatcharr-api-key> with an active Dispatcharr API key.
-
-[vodfs]
-type = http
-url = http://127.0.0.1:{port}/
-headers = Authorization, ApiKey <your-dispatcharr-api-key>
-"""
-            message = f"Open {config_url} for a copy/paste rclone config. Use any active Dispatcharr API key for authentication."
-        else:
-            config = f"""# VODFS rclone remote
-# Paste this block into your rclone.conf file.
-# Suggested mount point: /mnt/vodfs
-# Mount command:
-#   mkdir -p /mnt/vodfs
-#   rclone mount vodfs: /mnt/vodfs --allow-other --vfs-cache-mode off --dir-cache-time 5s --poll-interval 0
-# Plex library paths:
-#   Movies: /mnt/vodfs/Movies/All
-#   Series: /mnt/vodfs/Series/All
-# Secured installs: enable plugin auth, then uncomment the headers line and replace the placeholder.
-
-[vodfs]
-type = http
-url = http://127.0.0.1:{port}/
-# headers = Authorization, ApiKey <your-dispatcharr-api-key>
-"""
-            message = f"Open {config_url} for a copy/paste rclone config."
-
+        We don't embed the config in this (toast-style) message — it would flash and,
+        worse, we can't know the externally-reachable host from in here. Instead the
+        page at /vodfs/rclone_conf builds the correct remote URL from your own browser
+        request (reverse-proxy aware), so whatever host you opened Dispatcharr on is
+        what rclone gets. Relative path = no IP to get wrong."""
+        if not self._is_running(self._read_pid()):
+            return {"status": "error",
+                    "message": "Server not running — click 🚀 Enable first, then this button."}
+        auth_note = (" Use any active Dispatcharr API key in the headers line."
+                     if settings.get("enable_auth", False) else "")
         return {
             "status": "ok",
-            "url": config_url,
-            "config": config,
-            "message": message
+            "message": ("Open  /vodfs/rclone_conf  on this host (just append it to your "
+                        "Dispatcharr URL) for the copy/paste rclone config — the remote URL "
+                        "is filled in correctly from your browser." + auth_note),
         }
 
     def stop(self, context: Dict[str, Any]):

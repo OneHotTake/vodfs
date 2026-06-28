@@ -9,27 +9,70 @@
   "min_dispatcharr_version": "v0.20.0",
   "fields": [
     {
+      "id": "_setup",
+      "label": "📋 Getting started",
+      "type": "info",
+      "description": "1) Click 🚀 Enable. 2) Click 📋 rclone Config and follow it (it links to /vodfs/rclone_conf on this host). 3) Point Plex at /mnt/vodfs/Movies/<Category> (per-category, not /All). 4) Click 💧 Hydrate Now — titles appear as Dispatcharr fetches their size. 5) Click 🩺 Status anytime to see progress. Tip: open /vodfs/ in a browser to inspect the filesystem."
+    },
+    {
       "id": "http_port",
       "label": "HTTP Port",
       "type": "number",
       "default": 8888,
       "min": 1024,
       "max": 65535,
-      "help_text": "Port for the HTTP filesystem server"
+      "help_text": "Container-internal port for the HTTP filesystem server. Served to rclone/Plex via Dispatcharr's nginx at /vodfs/."
     },
     {
       "id": "dispatcharr_base_url",
       "label": "Dispatcharr Base URL",
       "type": "string",
       "default": "http://127.0.0.1:9191",
-      "help_text": "Base URL of Dispatcharr instance (must be reachable from rclone/Plex)"
+      "help_text": "Internal Dispatcharr URL the plugin uses to build 302 redirect targets. The reachable rclone/Plex URL is derived from your browser request, not this."
     },
     {
       "id": "enable_auth",
       "label": "Enable Authentication (Token-based)",
       "type": "boolean",
       "default": false,
-      "help_text": "When enabled, require a valid Dispatcharr API key via Authorization: ApiKey <key> or X-API-Key: <key> header. Default OFF for easy browser troubleshooting and initial setup."
+      "help_text": "Require a valid Dispatcharr API key (Authorization: ApiKey <key> or X-API-Key). Default OFF for easy browser inspection and setup."
+    },
+    {
+      "id": "_hydration",
+      "label": "⏰ Hydration (size backfill)",
+      "type": "info",
+      "description": "vodfs only shows titles whose size Dispatcharr already knows (stored bitrate). Hydration fetches that over time — movie detail + un-hydrated series — paced so the provider is never hammered. It runs a full pass on enable (if enabled below), then at the scheduled times. Pin it off-peak (e.g. 3am) so it never runs while you're watching."
+    },
+    {
+      "id": "scheduled_times",
+      "label": "⏰ Scheduled Run Times (24-hour)",
+      "type": "string",
+      "default": "0300",
+      "placeholder": "0300 or 0300,1500",
+      "help_text": "Comma-separated HHMM times to run hydration (e.g. 0300 = 3am). Blank = never on a schedule (manual/on-load only)."
+    },
+    {
+      "id": "timezone",
+      "label": "🌍 Timezone",
+      "type": "string",
+      "default": "America/Chicago",
+      "help_text": "IANA timezone for the scheduled times (e.g. America/Chicago, Europe/London)."
+    },
+    {
+      "id": "hydrate_rate",
+      "label": "🐢 Hydration Rate (per second)",
+      "type": "number",
+      "default": 2,
+      "min": 0,
+      "max": 50,
+      "help_text": "Refreshes submitted per second — the throttle. Higher = faster but more provider load. 0 disables hydration entirely."
+    },
+    {
+      "id": "hydrate_on_load",
+      "label": "Full sync on enable",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Run a full hydration pass when the server starts, then on the schedule above."
     }
   ],
   "actions": [
@@ -42,6 +85,30 @@
       "button_color": "green"
     },
     {
+      "id": "show_rclone_config",
+      "label": "Show rclone Configuration",
+      "description": "Where to get the copy/paste rclone config (the /vodfs/rclone_conf page on this host)",
+      "button_label": "📋 rclone Config",
+      "button_variant": "outline",
+      "button_color": "cyan"
+    },
+    {
+      "id": "run_hydration_now",
+      "label": "Hydrate Now",
+      "description": "Immediately run a hydration pass (backfill movie/series sizes), paced by the rate limit",
+      "button_label": "💧 Hydrate Now",
+      "button_variant": "filled",
+      "button_color": "blue"
+    },
+    {
+      "id": "check_status",
+      "label": "Status",
+      "description": "Server health, how many titles are visible vs pending hydration, and the next scheduled run",
+      "button_label": "🩺 Status",
+      "button_variant": "outline",
+      "button_color": "blue"
+    },
+    {
       "id": "disable",
       "label": "Disable HTTP Filesystem",
       "description": "Stop the HTTP filesystem server",
@@ -51,14 +118,6 @@
       "confirm": {
         "message": "Are you sure you want to stop the HTTP filesystem server?"
       }
-    },
-    {
-      "id": "show_rclone_config",
-      "label": "Show rclone Configuration",
-      "description": "Display the rclone configuration for mounting this filesystem",
-      "button_label": "📋 rclone Config",
-      "button_variant": "outline",
-      "button_color": "cyan"
     }
   ]
 }

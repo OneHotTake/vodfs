@@ -88,6 +88,18 @@ def _check_django_available():
     _server_ready = True
 
 
+def _external_base_url(request) -> str:
+    """Reconstruct the URL the client actually reached us on, honouring reverse-proxy
+    headers. Behind Dispatcharr's nginx (location /vodfs/), the browser hits
+    /vodfs/rclone_conf and these headers carry the real host + /vodfs prefix — so the
+    rclone config points at the right place with no configured IP to get wrong."""
+    h = request.headers
+    proto = h.get("x-forwarded-proto") or request.url.scheme or "http"
+    host = h.get("x-forwarded-host") or h.get("host") or request.url.netloc
+    prefix = (h.get("x-forwarded-prefix") or "").rstrip("/")
+    return f"{proto}://{host}{prefix}"
+
+
 def _build_rclone_config(base_url: str) -> str:
     """Build copy/paste-ready rclone config and mount notes."""
     base_url = base_url.rstrip("/") + "/"
@@ -213,17 +225,35 @@ async def _collect_stats() -> dict:
 
 def create_app(tree: VirtualTree) -> FastAPI:
     """Create FastAPI application with HTTP filesystem handlers"""
+    try:
+        from .hydrator import Hydrator
+    except ImportError:
+        from hydrator import Hydrator
+    hydrator = Hydrator()
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         _check_django_available()
+        hydrator.start()
         try:
             yield
         finally:
+            hydrator.stop()
             shutdown_executor()
             logger.info("Shutdown complete")
 
     app = FastAPI(title="VOD HTTP Filesystem", lifespan=lifespan)
     httpfs = HTTPFilesystem(tree)
+
+    @app.post("/hydrate/run")
+    async def hydrate_run(_auth=Depends(check_api_key_auth)):
+        """Kick an immediate hydration pass (the 'Hydrate Now' action)."""
+        ok = hydrator.trigger_now()
+        return JSONResponse(content={"triggered": ok, "status": hydrator.status()})
+
+    @app.get("/hydrate/status")
+    async def hydrate_status(_auth=Depends(check_api_key_auth)):
+        return JSONResponse(content=hydrator.status())
 
     @app.get("/healthz")
     async def healthz():
@@ -271,9 +301,10 @@ def create_app(tree: VirtualTree) -> FastAPI:
         _network=Depends(check_network_access),
         _auth=Depends(check_api_key_auth),
     ):
-        """Return copy/paste-ready rclone configuration."""
+        """Return copy/paste-ready rclone configuration, with the remote URL derived
+        from the request (reverse-proxy aware) — no configured IP to get wrong."""
         return Response(
-            content=_build_rclone_config(str(request.base_url)),
+            content=_build_rclone_config(_external_base_url(request)),
             media_type="text/plain; charset=utf-8",
         )
 
