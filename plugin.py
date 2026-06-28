@@ -148,22 +148,52 @@ class Plugin:
 
     _DEPENDENCIES = ("uvicorn", "fastapi", "jinja2")
 
-    def _ensure_dependencies(self, python_exe: str, logger: logging.Logger) -> None:
-        """Best-effort install of the web-server dependencies into Dispatcharr's venv."""
-        check = "import importlib.util,sys; sys.exit(0 if all(importlib.util.find_spec(m) for m in %r) else 1)" % (self._DEPENDENCIES,)
+    def _ensure_dependencies(self, python_exe: str, logger: logging.Logger) -> str | None:
+        """Install the web-server deps into Dispatcharr's venv.
+
+        Returns None once uvicorn/fastapi/jinja2 are importable, or an actionable
+        error string if they're still missing after the attempt. The child server
+        can't start without them, so we fail loudly (surfaced in the UI) rather than
+        spawning a process that just crashes on ``import uvicorn``.
+        """
+        check = ("import importlib.util,sys; "
+                 "sys.exit(0 if all(importlib.util.find_spec(m) for m in %r) else 1)"
+                 % (self._DEPENDENCIES,))
+        manual = "%s -m pip install %s" % (python_exe, " ".join(self._DEPENDENCIES))
+
+        def importable():
+            try:
+                return subprocess.call([python_exe, "-c", check]) == 0
+            except Exception as e:
+                logger.warning("Could not run dependency check via %s (%s)", python_exe, e)
+                return None  # python_exe itself is wrong/unrunnable
+
+        present = importable()
+        if present:
+            return None
+        if present is None:
+            return ("VODFS can't find a usable Python to install its dependencies "
+                    "(tried %s). Install uvicorn, fastapi and jinja2 into Dispatcharr's "
+                    "environment, then click Enable again." % python_exe)
+
+        logger.info("Installing VODFS web dependencies: %s", ", ".join(self._DEPENDENCIES))
         try:
-            if subprocess.call([python_exe, "-c", check]) == 0:
-                return
-            logger.info("Installing VODFS web dependencies: %s", ", ".join(self._DEPENDENCIES))
             subprocess.call([python_exe, "-m", "ensurepip", "--upgrade"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            rc = subprocess.call([python_exe, "-m", "pip", "install", "-q", *self._DEPENDENCIES])
-            if rc != 0:
-                logger.warning("Dependency install returned %d; server may fail to start. "
-                               "Install manually: %s -m pip install %s",
-                               rc, python_exe, " ".join(self._DEPENDENCIES))
+            proc = subprocess.run([python_exe, "-m", "pip", "install", "-q", *self._DEPENDENCIES],
+                                  capture_output=True, text=True)
+            if proc.returncode != 0:
+                logger.warning("pip install failed (rc=%d): %s", proc.returncode,
+                               (proc.stderr or proc.stdout or "").strip()[-800:])
         except Exception as e:
-            logger.warning("Could not verify/install dependencies (%s); continuing", e)
+            logger.warning("Dependency install errored (%s)", e)
+
+        # Re-verify regardless of pip's exit code (the venv may already be partial).
+        if importable():
+            return None
+        return ("VODFS couldn't auto-install its web dependencies (uvicorn, fastapi, "
+                "jinja2) — see the plugin log for the pip error. Install them in "
+                "Dispatcharr's environment, then click Enable again:\n  " + manual)
 
     @staticmethod
     def _validate_base_url(url: str) -> str | None:
@@ -222,8 +252,13 @@ class Plugin:
         python_exe = "/dispatcharrpy/bin/python"
 
         # The web server needs uvicorn/fastapi/jinja2, which are not part of
-        # Dispatcharr's base environment. Install them on first enable.
-        self._ensure_dependencies(python_exe, logger)
+        # Dispatcharr's base environment. Install them on first enable; bail with an
+        # actionable message if that fails so the user isn't left with a silently
+        # crashing child (the old behaviour — it just logged and continued).
+        dep_error = self._ensure_dependencies(python_exe, logger)
+        if dep_error:
+            logger.error(dep_error)
+            return {"status": "error", "message": dep_error}
 
         cmd = [
             python_exe, runner_path,
