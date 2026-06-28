@@ -10,6 +10,7 @@ re-parsing. Folder -> object lookups are warmed during directory listing and fal
 back to a tmdb/title parse for cold access.
 """
 
+import os
 import re
 import logging
 from dataclasses import dataclass, field
@@ -34,6 +35,20 @@ _TMDB_RE = re.compile(r'\{tmdb-(\w+)\}')
 _IMDB_RE = re.compile(r'\{imdb-(tt\w+)\}')
 _STREAMID_RE = re.compile(r'-\s*([0-9]+)\.[A-Za-z0-9]+$')   # trailing ' - <sid>.ext'
 _SEASON_RE = re.compile(r'^Season\s+(\d{1,3})$', re.IGNORECASE)
+
+# Eventual-consistency gate: only surface titles whose real size Dispatcharr already
+# knows (stored bitrate). Unsized titles stay hidden so Plex never sees — and never
+# probes the provider for — a file with an unknown size. Dispatcharr backfills sizes
+# over time (movies via refresh_movie_advanced_data; episodes during series
+# hydration), and titles appear as their size lands. Set VODFS_REQUIRE_SIZE=false to
+# show everything (then enable VODFS_PROBE_SIZE so playback still gets a real size).
+_REQUIRE_SIZE = os.environ.get("VODFS_REQUIRE_SIZE", "true").lower() == "true"
+# JSON paths to the stored overall bitrate (two Dispatcharr shapes).
+_MOVIE_SIZED = {"custom_properties__detailed_info__bitrate__gt": 0}
+_SERIES_HAS_SIZED_EP = {
+    "series__episodes__m3u_relations__custom_properties__info__info__bitrate__gt": 0}
+_EPISODE_SIZED = {"custom_properties__info__info__bitrate__gt": 0}
+
 
 # Only enabled categories whose account matches the relation's account, and only
 # while that account is active. Without the is_active gate a deactivated provider
@@ -163,7 +178,8 @@ class VirtualTree:
             from apps.vod.models import M3UMovieRelation
         except ImportError:
             return
-        qs = (M3UMovieRelation.objects.filter(**_enabled())
+        sized = _MOVIE_SIZED if _REQUIRE_SIZE else {}
+        qs = (M3UMovieRelation.objects.filter(**_enabled(), **sized)
               .values('movie_id', 'movie__name', 'movie__year',
                       'movie__tmdb_id', 'movie__imdb_id')
               .order_by('movie_id'))
@@ -187,8 +203,9 @@ class VirtualTree:
             from apps.vod.models import M3UMovieRelation
         except ImportError:
             return []
-        qs = M3UMovieRelation.objects.filter(**_enabled(movie=movie)).select_related(
-            'm3u_account', 'category')
+        sized = _MOVIE_SIZED if _REQUIRE_SIZE else {}
+        qs = M3UMovieRelation.objects.filter(
+            **_enabled(movie=movie), **sized).select_related('m3u_account', 'category')
         if category:
             qs = qs.filter(category__name=category)
         multi = qs.count() > 1
@@ -230,7 +247,8 @@ class VirtualTree:
             from apps.vod.models import M3USeriesRelation
         except ImportError:
             return
-        qs = (M3USeriesRelation.objects.filter(**_enabled())
+        sized = _SERIES_HAS_SIZED_EP if _REQUIRE_SIZE else {}
+        qs = (M3USeriesRelation.objects.filter(**_enabled(), **sized)
               .values('series_id', 'series__name', 'series__year',
                       'series__tmdb_id', 'series__imdb_id')
               .order_by('series_id'))
@@ -399,13 +417,15 @@ class VirtualTree:
         try:
             if kind == "movie":
                 from apps.vod.models import M3UMovieRelation
+                sized = _MOVIE_SIZED if _REQUIRE_SIZE else {}
                 rel = M3UMovieRelation.objects.filter(
-                    stream_id=stream_id, **_enabled()).select_related('movie').first()
+                    stream_id=stream_id, **_enabled(), **sized
+                ).select_related('movie').first()
                 if not rel:
                     return None
                 uuid = str(rel.movie.uuid)
-                # Exact size is mandatory (undersized -> truncated -> unplayable):
-                # stored bitrate (free) -> proxy probe -> duration estimate (last resort).
+                # Stored bitrate (free, exact) -> probe (only if VODFS_PROBE_SIZE) ->
+                # estimate. With the size gate on, bitrate is always present here.
                 size = (size_from_bitrate(rel.custom_properties, rel.movie.duration_secs)
                         or probe_real_size("movie", uuid, stream_id)
                         or estimate_size(rel.movie.duration_secs))
@@ -413,10 +433,12 @@ class VirtualTree:
                 return FileNode(filename, url, size)
             else:
                 from apps.vod.models import M3UEpisodeRelation
+                sized = _EPISODE_SIZED if _REQUIRE_SIZE else {}
                 rel = M3UEpisodeRelation.objects.filter(
                     stream_id=stream_id,
                     series_relation__category__m3u_relations__enabled=True,
                     m3u_account__is_active=True,
+                    **sized,
                 ).select_related('episode').first()
                 if not rel:
                     return None

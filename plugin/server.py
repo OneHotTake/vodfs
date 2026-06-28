@@ -142,9 +142,9 @@ def _query_stats_sync() -> dict:
         return {"available": False}
 
     try:
-        from .tree import _enabled
+        from .tree import _enabled, _MOVIE_SIZED, _SERIES_HAS_SIZED_EP
     except ImportError:
-        from tree import _enabled
+        from tree import _enabled, _MOVIE_SIZED, _SERIES_HAS_SIZED_EP
     enabled = _enabled()
     # Same predicate but for *inactive* accounts: content that would be listed if
     # the provider were re-activated. Surfacing it explains a sudden drop in counts.
@@ -165,14 +165,21 @@ def _query_stats_sync() -> dict:
     def orphaned_total(model):
         return model.objects.filter(**orphaned).distinct().count()
 
+    # "sized" = how many are actually visible under the size gate (have a known
+    # size). The gap to total is the movie backfill's remaining work.
+    movies_sized = M3UMovieRelation.objects.filter(**enabled, **_MOVIE_SIZED).distinct().count()
+    series_sized = M3USeriesRelation.objects.filter(**enabled, **_SERIES_HAS_SIZED_EP).distinct().count()
+
     return {
         "available": True,
         "movies": {
             "total": total(M3UMovieRelation),
+            "sized": movies_sized,
             "by_category": per_category(M3UMovieRelation),
         },
         "series": {
             "total": total(M3USeriesRelation),
+            "sized": series_sized,
             "by_category": per_category(M3USeriesRelation),
         },
         "orphaned": {

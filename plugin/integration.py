@@ -370,12 +370,18 @@ class DispatcharrIntegrator:
 
         relations_by_episode = defaultdict(list)
         if episode_ids and F is not None:
+            # Size gate: hide episodes whose size Dispatcharr doesn't know yet, so
+            # Plex never sees an unsized (un-probable) episode.
+            ep_sized = ({"custom_properties__info__info__bitrate__gt": 0}
+                        if os.environ.get("VODFS_REQUIRE_SIZE", "true").lower() == "true"
+                        else {})
             relations = M3UEpisodeRelation.objects.filter(
                 episode_id__in=episode_ids,
                 series_relation__series=series,
                 series_relation__category__m3u_relations__enabled=True,
                 series_relation__category__m3u_relations__m3u_account=F("m3u_account"),
                 m3u_account__is_active=True,
+                **ep_sized,
             ).select_related('episode', 'm3u_account', 'series_relation',
                              'series_relation__category').distinct()
             for rel in relations:
@@ -465,14 +471,12 @@ def size_from_metadata(custom_properties, duration_secs: Optional[int] = None) -
 # --- accurate size probing ------------------------------------------------------
 # The real byte size is MANDATORY for playback: rclone caps reads at the size we
 # report, so an undersized estimate truncates the container and Plex sees "no video
-# or audio stream" (file unplayable). We therefore probe the native proxy for the
-# true size (Content-Range) when Dispatcharr has no stored bitrate to derive it from.
-# Probing is ON by default. To avoid one upstream request per title during a scan,
-# either run Dispatcharr's VOD detailed-info refresh (populates bitrate -> exact size
-# with no probe) or set a per-provider max-connections cap. Results are cached, and
-# VODFS_PROBE_CONCURRENCY bounds concurrent probes. Set VODFS_PROBE_SIZE=false only if
-# every title already has bitrate metadata.
-_PROBE_ENABLED = os.environ.get("VODFS_PROBE_SIZE", "true").lower() == "true"
+# or audio stream" (file unplayable). Sizes normally come from Dispatcharr's stored
+# bitrate (size_from_bitrate), so probing is OFF by default — it is only a fallback
+# for the VODFS_REQUIRE_SIZE=false mode (show everything, probe on open). With the
+# size gate ON (default), only titles whose size Dispatcharr already knows are shown,
+# so no probe is ever needed and a Plex scan never touches the provider.
+_PROBE_ENABLED = os.environ.get("VODFS_PROBE_SIZE", "false").lower() == "true"
 _size_cache: Dict[str, int] = {}
 _size_cache_lock = threading.Lock()
 _probe_sem = threading.Semaphore(int(os.environ.get("VODFS_PROBE_CONCURRENCY", "4")))
