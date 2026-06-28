@@ -117,6 +117,12 @@ class Plugin:
 
     def _check_status(self, settings: Dict[str, Any]) -> Dict[str, Any]:
         if not self._is_running(self._read_pid()):
+            # If it's down because the web deps never installed, scream red with the
+            # exact fix instead of the calm "click Enable" — Enable will just fail again.
+            missing = self._missing_dependencies(self._PYTHON_EXE)
+            if missing:
+                return {"status": "error",
+                        "message": self._dep_red_alert(self._PYTHON_EXE, missing)}
             return {"status": "ok", "message": "Server is STOPPED. Click 🚀 Enable to start."}
         try:
             stats = self._child(settings, "/stats")
@@ -147,53 +153,99 @@ class Plugin:
         return {"status": "ok", "message": "\n".join(lines)}
 
     _DEPENDENCIES = ("uvicorn", "fastapi", "jinja2")
+    # Dispatcharr's bundled interpreter (sys.executable in-container is uwsgi).
+    _PYTHON_EXE = "/dispatcharrpy/bin/python"
+
+    def _missing_dependencies(self, python_exe: str):
+        """Return the list of import-missing dep names ([] if all present), or
+        None if python_exe can't be run at all (wrong path / no interpreter)."""
+        import json
+        names = ",".join(repr(m) for m in self._DEPENDENCIES)
+        probe = ("import importlib.util,json,sys;"
+                 "print(json.dumps([m for m in [%s] "
+                 "if importlib.util.find_spec(m) is None]))" % names)
+        try:
+            out = subprocess.run([python_exe, "-c", probe],
+                                 capture_output=True, text=True)
+            if out.returncode != 0:
+                return None
+            return json.loads((out.stdout or "[]").strip() or "[]")
+        except Exception:
+            return None
+
+    def _dep_red_alert(self, python_exe: str, missing, pip_error: str | None = None) -> str:
+        """A loud, copy-pasteable remediation banner for missing web deps.
+
+        Includes THIS container's name so the docker exec line is runnable as-is."""
+        import socket
+        try:
+            host = socket.gethostname()          # in-container = container id, usable by `docker exec`
+        except Exception:
+            host = "<dispatcharr-container>"
+        miss = " ".join(missing) if missing else " ".join(self._DEPENDENCIES)
+        pkgs = " ".join(self._DEPENDENCIES)
+        lines = [
+            "🟥🟥🟥 VODFS IS DOWN — PYTHON DEPENDENCIES NOT INSTALLED 🟥🟥🟥",
+            "",
+            f"Missing from Dispatcharr's Python ({python_exe}): {miss}",
+            "Automatic `pip install` did NOT succeed, so the HTTP filesystem server",
+            "CANNOT start. Nothing works until these three packages are installed.",
+            "",
+            "━━━━━━━━━━ FIX IT (copy / paste) ━━━━━━━━━━",
+            "",
+            "① From the Docker HOST — one shot:",
+            f"   docker exec {host} {python_exe} -m pip install {pkgs}",
+            "",
+            "② If pip itself is missing, bootstrap it first, then install:",
+            f"   docker exec {host} {python_exe} -m ensurepip --upgrade",
+            f"   docker exec {host} {python_exe} -m pip install {pkgs}",
+            "",
+            "③ Already inside the container? Drop the `docker exec ...` prefix:",
+            f"   {python_exe} -m pip install {pkgs}",
+            "",
+            "Then click 🚀 Enable again — Status will go green once it imports.",
+        ]
+        if pip_error:
+            lines += ["", "── pip said ──", pip_error.strip()[-700:]]
+        return "\n".join(lines)
 
     def _ensure_dependencies(self, python_exe: str, logger: logging.Logger) -> str | None:
-        """Install the web-server deps into Dispatcharr's venv.
+        """Install uvicorn/fastapi/jinja2 into Dispatcharr's venv.
 
-        Returns None once uvicorn/fastapi/jinja2 are importable, or an actionable
-        error string if they're still missing after the attempt. The child server
-        can't start without them, so we fail loudly (surfaced in the UI) rather than
-        spawning a process that just crashes on ``import uvicorn``.
+        Returns None once all three import, or a loud red remediation banner if any
+        are still missing after the attempt. The child server can't start without
+        them, so we scream in the UI rather than spawn a process that just crashes
+        on ``import uvicorn``.
         """
-        check = ("import importlib.util,sys; "
-                 "sys.exit(0 if all(importlib.util.find_spec(m) for m in %r) else 1)"
-                 % (self._DEPENDENCIES,))
-        manual = "%s -m pip install %s" % (python_exe, " ".join(self._DEPENDENCIES))
-
-        def importable():
-            try:
-                return subprocess.call([python_exe, "-c", check]) == 0
-            except Exception as e:
-                logger.warning("Could not run dependency check via %s (%s)", python_exe, e)
-                return None  # python_exe itself is wrong/unrunnable
-
-        present = importable()
-        if present:
+        missing = self._missing_dependencies(python_exe)
+        if missing == []:
             return None
-        if present is None:
-            return ("VODFS can't find a usable Python to install its dependencies "
-                    "(tried %s). Install uvicorn, fastapi and jinja2 into Dispatcharr's "
-                    "environment, then click Enable again." % python_exe)
+        if missing is None:    # python_exe unrunnable — surface it, don't pretend to install
+            alert = self._dep_red_alert(python_exe, self._DEPENDENCIES,
+                                        pip_error=f"Could not execute {python_exe} at all.")
+            logger.error(alert)
+            return alert
 
-        logger.info("Installing VODFS web dependencies: %s", ", ".join(self._DEPENDENCIES))
+        logger.info("Installing VODFS web dependencies: %s", ", ".join(missing))
+        pip_error = None
         try:
             subprocess.call([python_exe, "-m", "ensurepip", "--upgrade"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             proc = subprocess.run([python_exe, "-m", "pip", "install", "-q", *self._DEPENDENCIES],
                                   capture_output=True, text=True)
             if proc.returncode != 0:
-                logger.warning("pip install failed (rc=%d): %s", proc.returncode,
-                               (proc.stderr or proc.stdout or "").strip()[-800:])
+                pip_error = (proc.stderr or proc.stdout or "").strip()
+                logger.warning("pip install failed (rc=%d): %s", proc.returncode, pip_error[-800:])
         except Exception as e:
+            pip_error = str(e)
             logger.warning("Dependency install errored (%s)", e)
 
-        # Re-verify regardless of pip's exit code (the venv may already be partial).
-        if importable():
+        still = self._missing_dependencies(python_exe)
+        if still == []:        # success (possibly despite a noisy pip rc)
             return None
-        return ("VODFS couldn't auto-install its web dependencies (uvicorn, fastapi, "
-                "jinja2) — see the plugin log for the pip error. Install them in "
-                "Dispatcharr's environment, then click Enable again:\n  " + manual)
+        alert = self._dep_red_alert(python_exe, still, pip_error)
+        logger.error(alert)
+        return alert
 
     @staticmethod
     def _validate_base_url(url: str) -> str | None:
@@ -249,7 +301,7 @@ class Plugin:
         runner_path = os.path.join(plugin_subdir, "standalone_runner.py")
 
         # Use the Dispatcharr Python environment (sys.executable is uwsgi in the container).
-        python_exe = "/dispatcharrpy/bin/python"
+        python_exe = self._PYTHON_EXE
 
         # The web server needs uvicorn/fastapi/jinja2, which are not part of
         # Dispatcharr's base environment. Install them on first enable; bail with an
