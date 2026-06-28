@@ -109,15 +109,18 @@ def _build_rclone_config(base_url: str) -> str:
 #   Series: /mnt/vodfs/Series/<Category>   (or /mnt/vodfs/Series/All)
 #
 # AVOID HAMMERING YOUR PROVIDER (important at scale):
-#   - 'no_head = true' below makes rclone trust the listing size instead of issuing
-#     a HEAD per file during a scan. Keep it on unless you specifically need exact
-#     sizes (set VODFS_PROBE_SIZE=true on the plugin, and expect provider load).
+#   - vodfs serves duration-based ESTIMATE sizes by default (no provider probe), so
+#     rclone's per-file HEAD during a scan is cheap and NEVER touches your provider —
+#     it only queries Dispatcharr. Keep 'no_head = false' (the default): with
+#     no_head = true rclone can't read our listing sizes and every file shows an
+#     unknown size, which breaks Plex. The provider is only contacted on real
+#     playback (the proxy reports the true size then).
 #   - In Plex, DISABLE deep analysis during scan: Settings > Library >
 #     uncheck "Analyze audio tracks"/"Perform extensive media analysis", and prefer
 #     "Scan my library automatically" off / scheduled. Plex opening every file for
-#     analysis is what slams the provider, not vodfs.
-#   - In Dispatcharr, set a per-provider MAX CONNECTIONS on each M3U account so a
-#     scan can't open more upstream streams than your provider allows. vodfs only
+#     analysis is what actually slams the provider.
+#   - In Dispatcharr, set a per-provider MAX CONNECTIONS on each M3U account so
+#     playback can't open more upstream streams than your provider allows. vodfs only
 #     issues 302 redirects (it is never in the data path), so this cap is the right
 #     place to throttle.
 {auth_note}
@@ -125,7 +128,7 @@ def _build_rclone_config(base_url: str) -> str:
 [vodfs]
 type = http
 url = {base_url}
-no_head = true
+no_head = false
 {auth_line}
 """
 
