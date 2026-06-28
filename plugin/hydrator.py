@@ -39,6 +39,11 @@ class Hydrator:
         self.on_load = os.environ.get("VODFS_HYDRATE_ON_LOAD", "true").lower() == "true"
         self.times = _parse_times(os.environ.get("VODFS_HYDRATE_TIMES", ""))
         self.tz = os.environ.get("VODFS_HYDRATE_TZ", "America/Chicago")
+        # A pass stops after this many minutes so a scheduled run can't bleed into
+        # peak hours; it just resumes (where it left off) on the next scheduled time.
+        # 0 = unbounded. Advanced env knob, not a UI field.
+        self.max_minutes = float(os.environ.get("VODFS_HYDRATE_MAX_MINUTES", "240") or 0)
+        self._deadline = None
         self._thread = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -133,14 +138,17 @@ class Hydrator:
         if self._running:
             return
         self._running = True
+        self._deadline = (time.time() + self.max_minutes * 60) if self.max_minutes else None
         try:
             from django.db import close_old_connections
             close_old_connections()
             nm = self._drip_movies()
             ns = self._drip_series()
-            self._last = (reason, time.time(), nm, ns)
-            logger.info("Hydration pass (%s) done: %d movies, %d series refreshed",
-                        reason, nm, ns)
+            capped = self._deadline is not None and time.time() >= self._deadline
+            self._last = (reason + (" (time-capped)" if capped else ""),
+                          time.time(), nm, ns)
+            logger.info("Hydration pass (%s) done: %d movies, %d series refreshed%s",
+                        reason, nm, ns, " [time-capped]" if capped else "")
         except Exception:
             logger.exception("Hydration pass failed")
         finally:
@@ -150,6 +158,11 @@ class Hydrator:
             except Exception:
                 pass
             self._running = False
+
+    def _expired(self):
+        """Stop the current pass on shutdown or once the time cap is reached."""
+        return self._stop.is_set() or (
+            self._deadline is not None and time.time() >= self._deadline)
 
     def _sleep(self):
         # pace to the configured rate; interruptible by stop
@@ -173,7 +186,7 @@ class Hydrator:
         todo = sorted(all_ids - sized)          # set-diff: JSON exclude() misses nulls
         n = 0
         for rid in todo:
-            if self._stop.is_set():
+            if self._expired():
                 break
             try:
                 refresh_movie_advanced_data(rid)   # self-throttled to 24h by Dispatcharr
@@ -205,7 +218,7 @@ class Hydrator:
         n = 0
         for acct_id, sids in by_account.items():
             for i in range(0, len(sids), 50):     # small chunks, paced
-                if self._stop.is_set():
+                if self._expired():
                     return n
                 chunk = sids[i:i + 50]
                 try:
