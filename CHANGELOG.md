@@ -5,44 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] — 2026-06-28
+
+First production release. Verified end-to-end against Dispatcharr 0.27.1 with a live library (3,000+ movies, ~180 series, ~3,000 episodes): rclone mount → Plex match (TMDB/IMDB) → seekable playback through the native VOD proxy, validated with Plex, Chromium, and ffmpeg.
 
 ### Added
-- FastAPI HTTP filesystem server running as a Dispatcharr plugin child process, bootstrapped via `standalone_runner.py` (`django.setup()` before model imports).
-- `/Movies` and `/Series` virtual roots, each with `All` as a sibling of the per-category folders.
-- Multi-stream filenames — each provider surfaces its own file (`Title (Year) - PROVIDER-StreamID.ext`), with the stream ID embedded so a direct `GET` resolves deterministically after restart.
-- Season/episode browsing under `/Series/<Category>/<Show>/S01/`.
-- `302` redirects to Dispatcharr's `/proxy/vod/movie/...` and `/proxy/vod/episode/...` on file opens; VODFS never streams media bytes itself.
-- `/rclone_conf` endpoint returning a paste-ready rclone remote block, suggested mount point, mount command, and Plex library paths, keyed to the request's incoming host.
-- `/healthz` liveness endpoint.
-- `/stats` endpoint returning library visibility counts (totals plus per-enabled-category breakdown for movies and series, plus directory-cache stats). Mirrors the same enabled-category/same-account predicate the directory listings use, so the numbers reflect what rclone and Plex see. Counts only — no titles, URLs, or credentials. Gated by the same auth/network checks as the other endpoints.
-- `/fortune` endpoint.
-- Optional token authentication against existing Dispatcharr API keys (`Authorization: ApiKey <key>` or `X-API-Key: <key>`).
-- Inheritance of Dispatcharr's stream network-access policy when constructing redirect URLs.
-- In-memory TTL/LRU cache (5000 entries, 600s) fronting rendered directory listings.
-- Plugin manifest fields for HTTP port, Dispatcharr base URL, and auth toggle, with corresponding settings UI.
+- **Plex-correct naming.** A robust provider-name parser (validated against the full live catalog) strips quality/language prefixes (`4K-EN`, `EN|`, `D+`), bracket tags (`[MULTI-SUB]`, `[4K]`), list numbers, and dotted release names; extracts the year from the title when the DB field is empty; and emits external IDs as `{tmdb-NNN}` / `{imdb-ttNNN}`, each in its own brace, on movie folders/files and show folders.
+- **Plex TV layout** — `Show (Year) {tmdb-N}/Season NN/Show (Year) - SxxEyy - Title - StreamID.ext`.
+- **Accurate, seekable sizes.** On file `HEAD`/open VODFS probes Dispatcharr's VOD proxy once for the real `Content-Length` (from `Content-Range`) and caches it, so Plex analyses and seeks correctly. This also lets Plex surface the container's embedded multi-language audio and subtitle tracks.
+- **Self-bootstrapping dependencies** — the plugin installs `uvicorn`/`fastapi`/`jinja2` into Dispatcharr's environment on first enable.
+- Configurable bind host (`VODFS_BIND_HOST`) and size-probe controls (`VODFS_PROBE_SIZE`, `VODFS_PROBE_CONCURRENCY`).
 
 ### Changed
-- Live-query architecture. Directory listings are now Django ORM queries at request time against `M3UMovieRelation`, `M3USeriesRelation`, and `M3UEpisodeRelation`, joined through enabled category/account state. The plugin holds no library snapshot of its own.
-- Documentation rewritten end-to-end: user-facing README, `docs/OVERVIEW.md`, `docs/HTTPFS.md`, `docs/DEV_GUIDE.md`, `docs/TROUBLESHOOTING.md`, `CONTRIBUTING.md`.
-- Repository structure simplified: `architecture/` folded into `docs/`; empty `tests/` removed; AI-session scaffolding (`.ai/`, `CLAUDE.md`) and personal dev `scripts/` are kept on disk but untracked from the public repo.
-
-### Removed
-- Manifest snapshot layer.
-- Celery-based episode hydration (queue, cooldown, watermark polling). The plugin no longer maintains a second source of truth.
-- Stale documentation (`HYDRATION.md`, `docs/USER_GUIDE.md`).
+- **Resolution rewrite.** Files resolve by their trailing provider `stream_id` (unique per account) instead of re-parsing the full filename, and folder→object lookups use the TMDB id when present (exact) with a title/year fallback. The tree, HTTP, and integration layers were rewritten and simplified (net ~−270 lines).
+- Season directories are now `Season NN` (Plex convention) instead of `Sxx`.
+- Shared helpers consolidated: a single proxy-URL builder, enabled-category predicate, provider-suffix/extension helpers, and DB-task wrapper.
 
 ### Fixed
-- Child process now initializes Django before importing Dispatcharr models, so the server actually starts under the plugin runner.
-- Episode directory listing no longer recurses infinitely.
-- Direct file `GET` against a known stream resolves without requiring the parent directory to have been listed first.
-- Duplicate entries in directory listings.
-- Movie and episode resolution edge cases surfaced in the post-refactor audit.
+- **Critical: concurrency collapse under load.** Dispatcharr's gevent connection-pool DB backend is incompatible with the plugin's asyncio + thread-pool server (every concurrent request raised `gevent LoopExit` → 500). The standalone server now uses the standard blocking psycopg3 backend; a full Plex/rclone scan no longer fails. (Reproduced at 46/48 failures before, 96/96 success after.)
+- Worker-thread DB connection hygiene (`close_old_connections`) so a stalled connection no longer poisons a thread.
+- Honest bind-address logging (was claiming `127.0.0.1` while binding `0.0.0.0`).
+
+### Removed
+- `/fortune` easter-egg endpoint and its payload; unused `_child_process`, dead imports, and the no-op `build()` method.
 
 ### Security
-- Hard-coded credential fallback removed from the M3U setup helper.
-- `Authorization` and `X-API-Key` header values are stripped from log output; provider URLs are never exposed in responses or logs.
-- Plugin manifest gained the `enable_auth` toggle so deployments on untrusted networks can require an API key on every request.
+- Base URL scheme validation (rejects non-`http(s)` so the size probe can't be coerced onto another scheme); the base URL is operator-set and points at the trusted internal Dispatcharr.
+- Readiness/status endpoints now report real startup errors (the error list was dead).
+- Size-probe failures no longer log the full URL.
+- `enable_auth` toggle (existing) plus documented guidance to enable auth when the port is exposed beyond a trusted network.
 
 ## [0.1.0] — 2026-05-21
 

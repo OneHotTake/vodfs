@@ -33,11 +33,11 @@ The child binds to the port configured in plugin settings and is reached by rclo
 | File | Responsibility |
 |------|----------------|
 | `plugin.py` | Dispatcharr-side entry point. Starts and stops the child HTTP process; emits the rclone config from the plugin UI. |
-| `plugin/standalone_runner.py` | Child bootstrap. Calls `django.setup()` before anything else, then hands off to the server. |
-| `plugin/server.py` | FastAPI app: health endpoints, `/rclone_conf`, auth and network checks, uvicorn startup. |
-| `plugin/httpfs.py` | Request handling, directory rendering, file redirects, the synchronous-ORM thread pool. |
-| `plugin/tree.py` | Virtual path resolution and the DB-backed movie/series/episode lookups behind it. |
-| `plugin/integration.py` | Dispatcharr model integration; groups episode stream relations. |
+| `plugin/standalone_runner.py` | Child bootstrap. Calls `django.setup()`, swaps the DB backend to blocking psycopg3 (see below), then hands off to the server. |
+| `plugin/server.py` | FastAPI app: health endpoints, `/stats`, `/rclone_conf`, auth and network checks, uvicorn startup. |
+| `plugin/httpfs.py` | Request handling, directory rendering, file redirects, the synchronous-ORM thread pool with per-call connection hygiene. |
+| `plugin/tree.py` | Virtual path resolution and the DB-backed movie/series/episode lookups behind it; warms a folder→object map during listing. |
+| `plugin/integration.py` | Dispatcharr model integration; Plex-correct name parsing (`parse_title`), proxy-URL building, episode grouping, and real-size probing. |
 | `plugin/cache.py` | Small in-memory TTL/LRU cache fronting directory listings. |
 
 ## Filesystem Layout
@@ -54,19 +54,24 @@ Two top-level directories, each with `All` as a sibling of the category folders 
   /<enabled series category>
 ```
 
-Movie files:
+Each movie is its own folder containing one file per provider stream:
 
 ```text
-{Title} ({Year}) - {ProviderShortName}-{StreamID}.{ext}
+{Title} ({Year}) {tmdb-NNN} {imdb-ttNNN}/
+  {Title} ({Year}) {tmdb-NNN} {imdb-ttNNN} - {PROVIDER} - {StreamID}.{ext}
 ```
 
-Episode files:
+Series add a season level, with `Season NN` (not `Sxx`) folders:
 
 ```text
-S01E01 - {Episode Name} - {ProviderShortName}-{StreamID}.{ext}
+{Show} ({Year}) {tmdb-N}/
+  Season 01/
+    {Show} ({Year}) - S01E01 - {Episode Title} - {StreamID}.{ext}
 ```
 
-The stream ID lives in the filename on purpose: a direct `GET` against a known file can resolve back to the right relation without needing the parent directory to have been listed first, and the resolution is stable across plugin restarts.
+External IDs (`{tmdb-...}`, `{imdb-...}`) are each emitted in their own brace, which is what Plex's current Movie/TV agents expect. The names themselves are produced by `integration.parse_title`, which strips quality/language prefixes (`4K-EN`, `EN|`, `D+`), bracket tags (`[MULTI-SUB]`, `[4K]`), list numbers, and dotted-release names, and pulls the year out of the title when Dispatcharr's `year` field is empty. The provider label only appears when a title is carried by more than one account.
+
+The trailing stream ID lives in the filename on purpose: a direct `GET` against a known file resolves back to the right relation by that stream ID alone — unique per M3U account — without re-parsing the whole filename and without needing the parent directory to have been listed first, so resolution is stable across plugin restarts.
 
 ## Directory Listing Flow
 
@@ -80,19 +85,23 @@ rclone GET /Movies/All/
   → rclone parses the <a> tags as files and folders
 ```
 
-Series add one level on top — `/Series/All/<Show>/` yields season directories, and `/Series/All/<Show>/S01/` yields episode files.
+Series add a level on top — `/Series/All/<Show>/` yields `Season NN` directories, and `/Series/All/<Show>/Season 01/` yields episode files. Listing a movie or series folder also warms `tree.py`'s folder→object map so the subsequent descent is a cheap id lookup.
 
 ## File Playback Flow
 
 ```text
-Plex/rclone GET /Movies/All/Movie (2024) - STRONG-12345.mkv
-  → tree.py parses filename → stream_id=12345
-  → tree.py verifies the relation is enabled
+Plex/rclone GET /Movies/All/<folder>/Movie (2024) {tmdb-...} - STRONG - 12345.mkv
+  → tree.py pulls the trailing stream_id=12345 from the filename
+  → tree.py looks up the enabled relation by that stream_id
   → httpfs.py returns 302 Location: http://dispatcharr/proxy/vod/movie/<uuid>?stream_id=12345
   → client follows redirect; Dispatcharr streams the bytes
 ```
 
-Episodes are identical, with `/proxy/vod/episode/<uuid>?stream_id=<id>`.
+Episodes are identical, with `/proxy/vod/episode/<uuid>?stream_id=<id>`. Folder→object lookups (used to descend into a movie/show directory) prefer the embedded `tmdb_id` for an exact match, falling back to title/year.
+
+## Size Probing
+
+Plex seeks and analyses by byte range, so it needs the real file size — not the duration-based estimate VODFS uses for plain listings. On a file `HEAD`/open, the server probes Dispatcharr's VOD proxy once (`integration.probe_real_size`: a `urllib` `GET` with `Range: bytes=0-0`, reading the total out of the `Content-Range` header), caches the result, and bounds concurrent probes with a semaphore so a library scan doesn't open hundreds of provider connections at once. Accurate sizes are what let Plex analyse the container and surface its embedded multi-audio and subtitle tracks. Controlled by `VODFS_PROBE_SIZE` (on by default) and `VODFS_PROBE_CONCURRENCY`.
 
 ## Live DB Queries
 
@@ -109,7 +118,7 @@ Movie listings join through `M3UMovieRelation`, series through `M3USeriesRelatio
 
 ## Directory Cache
 
-`plugin/cache.py` is an in-memory TTL/LRU cache (5000 entries, 600 seconds) sitting in front of rendered directory listings. It is strictly a performance cache — the source of truth is always Dispatcharr, and the cache will catch up after expiry or a process restart.
+`plugin/cache.py` is an in-memory TTL/LRU cache (5000 entries, 300 seconds) sitting in front of rendered directory listings. It is strictly a performance cache — the source of truth is always Dispatcharr, and the cache will catch up after expiry or a process restart.
 
 ## `/rclone_conf`
 
@@ -121,11 +130,15 @@ Enable: `plugin.py` runs `subprocess.Popen(standalone_runner.py --port <port>)`.
 
 ## Threading
 
-FastAPI handlers are async; Django ORM is synchronous. `httpfs.py` owns a small `ThreadPoolExecutor` and dispatches all ORM work to it. This sidesteps `SynchronousOnlyOperation` while keeping the event loop responsive. New ORM code must go through that executor.
+FastAPI handlers are async; Django ORM is synchronous. `httpfs.py` owns a small `ThreadPoolExecutor` and dispatches all ORM work to it. This sidesteps `SynchronousOnlyOperation` while keeping the event loop responsive. New ORM code must go through that executor. Each dispatched call is wrapped with `close_old_connections()` on entry and exit so a connection left in a bad state by one request can't poison the next request on that thread.
+
+## Database Backend
+
+Dispatcharr runs its own workers under gevent and configures Django with `django_db_geventpool`, a cooperative connection pool that requires a running gevent hub. The VODFS child has no such hub — it's asyncio (uvicorn) plus a plain `ThreadPoolExecutor` — so the pooled connections raise `gevent LoopExit: This operation would block forever` under any real concurrency, turning a Plex/rclone scan into a wall of 500s. `standalone_runner._use_blocking_db_backend` swaps the `default` database over to the standard blocking `django.db.backends.postgresql` (psycopg3) backend at startup, giving each worker thread an ordinary blocking connection. This swap is local to the child process and does not touch Dispatcharr's own DB configuration.
 
 ## Security
 
-VODFS inherits Dispatcharr's deployment posture. The plugin never exposes upstream provider URLs — all file `GET`s redirect to Dispatcharr's proxy. Optional API-key authentication validates against existing Dispatcharr keys; no new credential is introduced. Network checks consult Dispatcharr's stream network-access policy when available. The server binds to whatever interface is configured, so secure the surrounding environment as you would any other Dispatcharr service.
+VODFS inherits Dispatcharr's deployment posture. The plugin never exposes upstream provider URLs — all file `GET`s redirect to Dispatcharr's proxy. Optional API-key authentication validates against existing Dispatcharr keys; no new credential is introduced. Network checks consult Dispatcharr's stream network-access policy when available. The server binds `0.0.0.0` by default (configurable via `VODFS_BIND_HOST`) because it has to be reachable through Docker's published port — a loopback-only listener can't be — so when the port is exposed beyond a trusted network, lean on `enable_auth` and Dispatcharr's `STREAMS` policy rather than the bind address.
 
 ## What Used to Be Here
 

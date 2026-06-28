@@ -1,7 +1,16 @@
-"""Dispatcharr VOD integration"""
+"""Dispatcharr VOD integration: live DB access + Plex-correct naming.
+
+The provider-supplied VOD names are noisy (quality/language prefixes, embedded
+years, junk tags). `parse_title` normalises them into a clean title + year +
+language hint so Plex's "Plex Movie"/"Plex TV Series" agents can match. External
+IDs (tmdb/imdb) are emitted one-per-brace as Plex requires.
+"""
 
 import os
+import re
 import logging
+import threading
+import urllib.request
 from collections import defaultdict
 from typing import List, Dict, Any, Optional
 
@@ -18,20 +27,287 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+_DEFAULT_BASE_URL = "http://127.0.0.1:9191"
+
+
 def _get_dispatcharr_base_url() -> str:
-    """Get Dispatcharr base URL from environment variable"""
-    return os.environ.get("VODFS_DISPATCHARR_BASE_URL", "http://127.0.0.1:9191").rstrip("/")
+    """Get the Dispatcharr base URL from the environment.
+
+    This is operator-configured and points at the trusted internal Dispatcharr
+    instance (all proxy/probe requests go here). We only validate the scheme so a
+    misconfigured value can't make urllib speak a non-HTTP scheme (file://, etc.).
+    """
+    url = os.environ.get("VODFS_DISPATCHARR_BASE_URL", _DEFAULT_BASE_URL).rstrip("/")
+    try:
+        from urllib.parse import urlparse
+        if urlparse(url).scheme not in ("http", "https"):
+            logger.warning("Ignoring non-HTTP VODFS_DISPATCHARR_BASE_URL; using default")
+            return _DEFAULT_BASE_URL
+    except Exception:
+        return _DEFAULT_BASE_URL
+    return url
+
+
+# --- Provider-name normalisation -------------------------------------------------
+
+# Language codes that may appear in a provider prefix; mapped to ISO-639-1 later.
+_LANG = {
+    'EN', 'FR', 'DE', 'IT', 'ES', 'PT', 'NL', 'PL', 'RU', 'AR', 'TR', 'SV', 'SE',
+    'NO', 'DA', 'DK', 'FI', 'EL', 'GR', 'RO', 'CS', 'CZ', 'HU', 'HE', 'HI', 'JA',
+    'KO', 'ZH', 'UK', 'BG', 'HR', 'SR', 'MULTI', 'MULTISUB', 'VOSTFR', 'VOST',
+    'VOSE', 'LAT', 'VO', 'DUAL',
+}
+# Quality / provider tags that may appear in a prefix (D+, A+ = Disney+/Apple TV+).
+_QUAL = {
+    '4K', 'UHD', 'HD', 'FHD', 'SD', 'HDR', 'HDR10', 'DV', '3D', 'HEVC', 'H265',
+    'X265', 'H264', 'X264', '1080P', '720P', '2160P', '480P', 'HDTS', 'HDCAM',
+    'CAM', 'TS', 'WEB', 'WEBDL', 'WEBRIP', 'BLURAY', 'BRRIP', 'DVDRIP', 'REMUX',
+    'D+', 'A+', 'N', 'P+', 'HBO', 'MAX',
+}
+_LANG_MAP = {
+    'MULTI': 'mul', 'MULTISUB': 'mul', 'VOST': 'mul', 'VOSTFR': 'fr', 'VOSE': 'es',
+    'LAT': 'es', 'SE': 'sv', 'DK': 'da', 'GR': 'el', 'CZ': 'cs',
+}
+_YEAR_RE = re.compile(r'(?:^|[^\d])((?:19|20)\d{2})(?:[^\d]|$)')
+_TAG_RE = re.compile(
+    r'[\[(]\s*(?:MULTI[- ]?SUB|MULTISUB|SUB|DUAL|VOST(?:FR|E)?|HDTS|HDCAM|CAM|HDR|'
+    r'HEVC|MAIN CARD|PRELIMS|EARLY PRELIMS|UNCUT|EXTENDED|REMASTERED|IMAX|3D|REPACK|'
+    r'\d{3,4}P)\s*[\])]', re.IGNORECASE)
+# Characters that are illegal/awkward in file names on common filesystems.
+_ILLEGAL_FS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+
+def _looks_like_prefix(token: str) -> bool:
+    """Is a pre-delimiter token a provider/quality/language code, not a real title?"""
+    t = (token or '').strip()
+    if not t or len(t) > 12:
+        return False
+    parts = [p for p in re.split(r'[-\s|]+', t.upper()) if p]
+    if not parts:
+        return False
+    for p in parts:
+        if p in _QUAL or p in _LANG:
+            continue
+        if re.fullmatch(r'[A-Z0-9]{1,4}\+?', p):  # short codes: 4K, EN, D+, N, P+
+            continue
+        return False
+    return True
+
+
+def _extract_lang(prefix: str) -> Optional[str]:
+    for p in re.split(r'[-\s|]+', (prefix or '').upper()):
+        if p in _LANG:
+            return _LANG_MAP.get(p, p.lower()[:2])
+    return None
+
+
+_ISO1 = {
+    'EN': 'en', 'FR': 'fr', 'DE': 'de', 'IT': 'it', 'ES': 'es', 'PT': 'pt',
+    'NL': 'nl', 'PL': 'pl', 'RU': 'ru', 'AR': 'ar', 'TR': 'tr', 'SV': 'sv',
+    'NO': 'no', 'DA': 'da', 'FI': 'fi', 'EL': 'el', 'RO': 'ro', 'CS': 'cs',
+    'HU': 'hu', 'HE': 'he', 'HI': 'hi', 'JA': 'ja', 'KO': 'ko', 'ZH': 'zh',
+    'UK': 'uk', 'HINDI': 'hi', 'ENG': 'en', 'SPA': 'es', 'FRE': 'fr', 'GER': 'de',
+}
+
+
+def _bracket_langs(name: str):
+    """Extract (audio_langs, sub_langs, dubbed, multi) from [TAG] groups."""
+    audio, subs = [], []
+    dubbed = multi = False
+    for grp in re.findall(r'\[([^\]]*)\]', name):
+        up = grp.upper()
+        toks = re.split(r'[-\s,/]+', up)
+        if 'DUB' in toks:
+            dubbed = True
+        if 'MULTI' in up or 'DUAL' in up:
+            multi = True
+        is_sub = 'SUB' in up
+        is_audio = 'AUDIO' in up or 'DUB' in toks or 'DUAL' in up
+        for t in toks:
+            iso = _ISO1.get(t)
+            if not iso:
+                continue
+            if is_sub and iso not in subs:
+                subs.append(iso)
+            if is_audio and iso not in audio:
+                audio.append(iso)
+    return audio, subs, dubbed, multi
+
+
+def parse_title(raw: str, year_field: Any = None) -> Dict[str, Any]:
+    """Normalise a provider VOD name into {title, year, language, audio, subs, ...}."""
+    name = re.sub(r'\s+', ' ', (raw or '').strip())
+    language = None
+    audio_langs, sub_langs, dubbed, multi = _bracket_langs(name)
+
+    # 1. Strip a leading provider/quality/language prefix delimited by '|' or ' - '.
+    if '|' in name:
+        left, right = name.split('|', 1)
+        if _looks_like_prefix(left):
+            language = _extract_lang(left)
+            name = right.strip()
+    if ' - ' in name:
+        left, right = name.split(' - ', 1)
+        if _looks_like_prefix(left):
+            language = language or _extract_lang(left)
+            name = right.strip()
+
+    # Strip a leading list-number prefix ("117. Die Hard" -> "Die Hard").
+    name = re.sub(r'^\d{1,4}\.\s+', '', name)
+
+    # 2. Year: prefer a sane year field, else extract from the name.
+    has_year_field = isinstance(year_field, int) and 1900 <= year_field <= 2100
+    year = year_field if has_year_field else None
+    if ' ' not in name and name.count('.') >= 2:  # dotted release name
+        name = name.replace('.', ' ')
+    name_before_year = name
+    matches = _YEAR_RE.findall(name)
+    if year is None and matches:
+        year = int(matches[-1])
+    work = name
+    if matches:  # remove the year token wherever it sits
+        work = re.sub(r'[\(\[]?\b' + matches[-1] + r'\b[\)\]]?', ' ', name)
+
+    work = _finalize(work)
+    if not work:
+        # The whole title was a year-like token (e.g. a movie named "1992").
+        work = _finalize(name_before_year)
+        if not has_year_field:
+            year = None
+
+    if language and language in _ISO1.values() and language not in audio_langs:
+        audio_langs.insert(0, language)
+    return {'title': work, 'year': year, 'language': language,
+            'audio': audio_langs, 'subs': sub_langs, 'dubbed': dubbed, 'multi': multi}
+
+
+def _finalize(name: str) -> str:
+    """Strip junk tags, bracket groups, trailing country codes; collapse whitespace."""
+    name = _TAG_RE.sub(' ', name)
+    name = re.sub(r'\[[^\]]*\]', ' ', name)                  # all [tag] groups
+    name = re.sub(r'\s*\((?:[A-Za-z]{2})\)\s*$', ' ', name)  # trailing country code
+    name = re.sub(r'[\[(]\s*[\])]', ' ', name)               # empty brackets
+    return re.sub(r'\s+', ' ', name).strip(' -._')
+
+
+def sanitize_filename(name: str) -> str:
+    """Make a tree component safe as a single path segment."""
+    name = _ILLEGAL_FS.sub(' ', name or '')
+    return re.sub(r'\s+', ' ', name).strip() or 'Unknown'
+
+
+def format_external_ids(tmdb_id: Any = None, imdb_id: Any = None) -> str:
+    """Return ' {tmdb-N} {imdb-ttX}' with each id in its own brace (Plex requirement)."""
+    ids = []
+    if tmdb_id:
+        ids.append('{tmdb-%s}' % str(tmdb_id).strip())
+    if imdb_id:
+        v = str(imdb_id).strip()
+        if v:
+            v = v if v.startswith('tt') else 'tt' + v
+            ids.append('{imdb-%s}' % v)
+    return (' ' + ' '.join(ids)) if ids else ''
+
+
+def _title_with_year(parsed: Dict[str, Any]) -> str:
+    base = parsed['title']
+    if parsed.get('year'):
+        base += ' (%d)' % parsed['year']
+    return base
+
+
+def _ext(relation) -> str:
+    return (getattr(relation, 'container_extension', None) or 'mkv').lstrip('.')
+
+
+def _provider_suffix(provider_label: str, relation) -> str:
+    """' - <provider> - <stream_id>' (or just ' - <stream_id>'); the stream_id
+    makes the filename unique and lets the file resolve back to one provider stream."""
+    sid = getattr(relation, 'stream_id', '')
+    return ' - %s - %s' % (provider_label, sid) if provider_label else ' - %s' % sid
+
+
+def episode_display_title(episode_name: str) -> str:
+    """Extract just the episode title from a provider episode name.
+
+    'A+ - Berlin ER (2025) (DE) - S01E01 - Symptoms' -> 'Symptoms'
+    """
+    if not episode_name:
+        return ''
+    m = re.search(r'[Ss]\d{1,3}[Ee]\d{1,4}\s*-\s*(.+)$', episode_name)
+    if m:
+        return sanitize_filename(m.group(1).strip())
+    # Fall back to the trailing segment after the last ' - ' if it isn't SxxExx.
+    parts = episode_name.rsplit(' - ', 1)
+    tail = parts[-1].strip() if len(parts) > 1 else ''
+    if tail and not re.match(r'^[Ss]\d', tail):
+        return sanitize_filename(tail)
+    return ''
 
 
 class DispatcharrIntegrator:
-    """Integration with Dispatcharr VOD models and tasks"""
+    """Integration with Dispatcharr VOD models and the native VOD proxy."""
 
     def is_available(self) -> bool:
-        """Check if Django models are available"""
         return DJANGO_AVAILABLE
 
+    # --- naming (Plex-correct) ---------------------------------------------------
+
+    def parse(self, raw: str, year_field: Any = None) -> Dict[str, Any]:
+        return parse_title(raw, year_field)
+
+    def movie_folder_name(self, movie) -> str:
+        p = parse_title(movie.name, getattr(movie, 'year', None))
+        base = _title_with_year(p) + format_external_ids(
+            getattr(movie, 'tmdb_id', None), getattr(movie, 'imdb_id', None))
+        return sanitize_filename(base)
+
+    def movie_filename(self, movie, relation, provider_label: str = '') -> str:
+        p = parse_title(movie.name, getattr(movie, 'year', None))
+        base = _title_with_year(p) + format_external_ids(
+            getattr(movie, 'tmdb_id', None), getattr(movie, 'imdb_id', None))
+        ext = _ext(relation)
+        return sanitize_filename(base + _provider_suffix(provider_label, relation)) + '.' + ext
+
+    def series_folder_name(self, series) -> str:
+        p = parse_title(series.name, getattr(series, 'year', None))
+        base = _title_with_year(p) + format_external_ids(
+            getattr(series, 'tmdb_id', None), getattr(series, 'imdb_id', None))
+        return sanitize_filename(base)
+
+    @staticmethod
+    def season_dir_name(season_number: int) -> str:
+        try:
+            return 'Season %02d' % int(season_number)
+        except (TypeError, ValueError):
+            return 'Season 01'
+
+    def episode_filename(self, series, season_number: int, episode_number: int,
+                         episode_name: str, relation, provider_label: str = '') -> str:
+        p = parse_title(series.name, getattr(series, 'year', None))
+        head = _title_with_year(p)
+        se = 'S%02dE%02d' % (int(season_number or 0), int(episode_number or 0))
+        ep_title = episode_display_title(episode_name)
+        name = '%s - %s' % (head, se)
+        if ep_title:
+            name += ' - %s' % ep_title
+        name += _provider_suffix(provider_label, relation)
+        return sanitize_filename(name) + '.' + _ext(relation)
+
+    # --- proxy URLs --------------------------------------------------------------
+
+    def get_proxy_url(self, content_type: str, uuid: str, stream_id: str) -> str:
+        """Native Dispatcharr VOD proxy URL. The proxy streams bytes with Range
+        support and a correct Content-Length, so Plex can analyse/seek."""
+        base_url = _get_dispatcharr_base_url()
+        if content_type not in ("movie", "episode"):
+            raise ValueError("Unknown content type: %s" % content_type)
+        return "%s/proxy/vod/%s/%s?stream_id=%s" % (base_url, content_type, uuid, stream_id)
+
+    # --- episodes ----------------------------------------------------------------
+
     def get_series_episodes(self, series_uuid: str) -> List[Dict[str, Any]]:
-        """Get episodes for a series"""
+        """Return episodes (with provider streams) for a series."""
         if not self.is_available():
             logger.warning("Django models not available")
             return []
@@ -42,9 +318,8 @@ class DispatcharrIntegrator:
             logger.warning("Series %s not found", series_uuid)
             return []
 
-        base_url = _get_dispatcharr_base_url()
         episodes = list(series.episodes.all().order_by('season_number', 'episode_number'))
-        episode_ids = [episode.id for episode in episodes]
+        episode_ids = [e.id for e in episodes]
 
         try:
             from django.db.models import F
@@ -58,8 +333,8 @@ class DispatcharrIntegrator:
                 series_relation__series=series,
                 series_relation__category__m3u_relations__enabled=True,
                 series_relation__category__m3u_relations__m3u_account=F("m3u_account"),
-            ).select_related('episode', 'm3u_account', 'series_relation', 'series_relation__category').distinct()
-
+            ).select_related('episode', 'm3u_account', 'series_relation',
+                             'series_relation__category').distinct()
             for rel in relations:
                 relations_by_episode[rel.episode_id].append(rel)
 
@@ -67,145 +342,75 @@ class DispatcharrIntegrator:
         for episode in episodes:
             streams = []
             for rel in relations_by_episode.get(episode.id, []):
-                # Use Dispatcharr proxy URL instead of direct provider URL
-                stream_url = f"{base_url}/proxy/vod/episode/{episode.uuid}?stream_id={rel.stream_id}"
-
-                # Estimate size from duration (if available)
-                # Typical streaming bitrate: ~2 Mbps = 250 KB/s
-                size = 0
-                if episode.duration_secs:
-                    size = episode.duration_secs * 250 * 1024  # bytes
-
+                stream_url = self.get_proxy_url("episode", str(episode.uuid), rel.stream_id)
                 streams.append({
                     "stream_id": rel.stream_id,
                     "account_name": rel.m3u_account.name if rel.m3u_account else "Unknown",
                     "stream_url": stream_url,
                     "extension": rel.container_extension or "mkv",
-                    "size": size
+                    "size": estimate_size(episode.duration_secs),
+                    "relation": rel,
                 })
-
             result.append({
                 "uuid": str(episode.uuid),
                 "name": episode.name,
                 "season_number": episode.season_number,
                 "episode_number": episode.episode_number,
                 "air_date": episode.air_date,
-                "streams": streams
+                "streams": streams,
             })
-
         return result
 
-    def get_proxy_url(self, content_type: str, uuid: str, stream_id: str) -> str:
-        """Generate Dispatcharr proxy URL for content"""
-        base_url = _get_dispatcharr_base_url()
-        if content_type == "movie":
-            return f"{base_url}/proxy/vod/movie/{uuid}?stream_id={stream_id}"
-        elif content_type == "episode":
-            return f"{base_url}/proxy/vod/episode/{uuid}?stream_id={stream_id}"
-        else:
-            raise ValueError(f"Unknown content type: {content_type}")
 
-    def clean_movie_name(self, name: str) -> tuple[str, str]:
-        """
-        Strip quality/language prefix from IPTV provider name.
-        Returns (clean_title, quality_prefix)
+# Typical streaming bitrate (~2 Mbps). Used only as a fallback when the real
+# Content-Length is unknown; the native proxy reports the true size on read.
+_BYTES_PER_SEC = 2_000_000 // 8
 
-        Examples:
-            "4K-EN - Deadpool (2016)" → ("Deadpool", "4K-EN")
-            "4K-D+ | Dawn of the Planet of the Apes (2014)" → ("Dawn of the Planet of the Apes", "4K-D+")
-            "HD FR - Matrix (1999)" → ("Matrix", "HD FR")
-            "3D IT - Avatar (2009)" → ("Avatar", "3D IT")
-            "Deadpool (2016)" → ("Deadpool", "")
-        """
-        # Split on ' - ' or ' | ' to remove quality prefix
-        quality_prefix = ""
-        if ' - ' in name:
-            parts = name.split(' - ', 1)
-            quality_prefix = parts[0].strip()
-            title_part = parts[1]
-        elif ' | ' in name:
-            parts = name.split(' | ', 1)
-            quality_prefix = parts[0].strip()
-            title_part = parts[1]
-        else:
-            title_part = name
 
-        # Remove year from title (pattern: Title (YYYY))
-        import re
-        clean_name = re.sub(r'\s*\(\d{4}\)\s*$', '', title_part).strip()
+def estimate_size(duration_secs: Optional[int]) -> int:
+    if duration_secs and duration_secs > 0:
+        return int(duration_secs) * _BYTES_PER_SEC
+    return 2 * 1024 * 1024 * 1024  # 2 GiB fallback so clients never see a 0-byte file
 
-        return clean_name, quality_prefix
 
-    def build_filename(self, title: str, year: int, provider_short: str, stream_id: str, ext: str, tmdb_id: str | None = None, imdb_id: str | None = None) -> str:
-        """Build filename with clean title, provider, stream, quality, and external IDs.
+# --- accurate size probing ------------------------------------------------------
+# Plex seeks/analyses by byte range, so it needs the real file size. The native
+# proxy reports it via Content-Range. We probe once per stream and cache it; a
+# semaphore bounds concurrent provider connections during a library scan.
+_PROBE_ENABLED = os.environ.get("VODFS_PROBE_SIZE", "true").lower() == "true"
+_size_cache: Dict[str, int] = {}
+_size_cache_lock = threading.Lock()
+_probe_sem = threading.Semaphore(int(os.environ.get("VODFS_PROBE_CONCURRENCY", "4")))
 
-        Format: {CleanTitle} ({Year}) - {Provider} - {StreamID} - {Quality} {imdb-XXX} {tmdb-XXX}.{ext}
-        Plex strips {ids} portion for matching, but provider/stream/quality remain visible.
-        """
-        # Clean the title (strip quality prefix and year) and extract quality
-        clean_title, quality = self.clean_movie_name(title)
 
-        # Build base filename
-        filename = f"{clean_title} ({year}) - {provider_short} - {stream_id}"
-
-        # Add quality if present
-        if quality:
-            filename += f" - {quality}"
-
-        # Add external IDs (both IMDB and TMDB if available)
-        ids = []
-        if imdb_id:
-            imdb_val = imdb_id if imdb_id.startswith('tt') else f'tt{imdb_id}'
-            ids.append(f'imdb-{imdb_val}')
-        if tmdb_id:
-            ids.append(f'tmdb-{tmdb_id}')
-
-        if ids:
-            filename += f" {{{' '.join(ids)}}}"
-
-        filename += f".{ext}"
-
-        return filename
-
-    def build_folder_name(self, title: str, year: int, tmdb_id: str | None = None, imdb_id: str | None = None) -> str:
-        """Build folder name for movie or series with external IDs."""
-        clean_title, _ = self.clean_movie_name(title)
-        folder_name = f"{clean_title} ({year})"
-
-        # Add external IDs (both IMDB and TMDB if available)
-        ids = []
-        if imdb_id:
-            imdb_val = imdb_id if imdb_id.startswith('tt') else f'tt{imdb_id}'
-            ids.append(f'imdb-{imdb_val}')
-        if tmdb_id:
-            ids.append(f'tmdb-{tmdb_id}')
-
-        if ids:
-            folder_name += f" {{{' '.join(ids)}}}"
-
-        return folder_name
-
-    def build_episode_filename(self, episode_name: str, series_name: str, year: int,
-                                season_number: int, episode_number: int, ext: str,
-                                tmdb_id: str | None = None, imdb_id: str | None = None) -> str:
-        """Build episode filename with clean series name and external IDs."""
-        clean_series, _ = self.clean_movie_name(series_name)
-        season_key = f"S{season_number:02d}"
-        episode_key = f"{season_key}E{episode_number:02d}"
-
-        filename = f"{clean_series} ({year}) - {episode_key}"
-
-        # Add external IDs (both IMDB and TMDB if available)
-        ids = []
-        if imdb_id:
-            imdb_val = imdb_id if imdb_id.startswith('tt') else f'tt{imdb_id}'
-            ids.append(f'imdb-{imdb_val}')
-        if tmdb_id:
-            ids.append(f'tmdb-{tmdb_id}')
-
-        if ids:
-            filename += f" {{{' '.join(ids)}}}"
-
-        filename += f".{ext}"
-
-        return filename
+def probe_real_size(content_type: str, uuid: str, stream_id: str,
+                    timeout: float = 10.0) -> Optional[int]:
+    """Return the true byte size of a VOD item via the native proxy, or None."""
+    if not _PROBE_ENABLED:
+        return None
+    key = "%s:%s" % (content_type, stream_id)
+    with _size_cache_lock:
+        if key in _size_cache:
+            return _size_cache[key]
+    url = "%s/proxy/vod/%s/%s?stream_id=%s" % (
+        _get_dispatcharr_base_url(), content_type, uuid, stream_id)
+    size = None
+    try:
+        with _probe_sem:
+            req = urllib.request.Request(url, headers={"Range": "bytes=0-0"}, method="GET")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                cr = resp.headers.get("Content-Range")
+                if cr and "/" in cr:
+                    total = cr.rsplit("/", 1)[1].strip()
+                    if total.isdigit():
+                        size = int(total)
+                if size is None:
+                    cl = resp.headers.get("Content-Length")
+                    if cl and cl.isdigit():
+                        size = int(cl)
+    except Exception as e:
+        logger.debug("size probe failed for stream_id=%s: %s", stream_id, e)
+    if size:
+        with _size_cache_lock:
+            _size_cache[key] = size
+    return size

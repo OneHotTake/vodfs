@@ -80,3 +80,6 @@ config.json
 /BACKLOG.md
 /REPO_MAP.md
 /TODO.md
+
+# Dispatcharr plugin hot-reload marker (runtime)
+.reload_token

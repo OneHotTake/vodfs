@@ -1,321 +1,170 @@
-"""HTTP filesystem request handlers with lazy resolution and caching"""
+"""HTTP filesystem request handlers: directory listings + 302 file redirects."""
 
-import logging
 import asyncio
-from typing import Dict, Any, Optional, List
+import logging
+from typing import Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor
+
 from fastapi import Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from jinja2 import Template
 from urllib.parse import quote
-from concurrent.futures import ThreadPoolExecutor
 
 try:
-    from .tree import FSNode, DirectoryNode, FileNode, VirtualTree
+    from .tree import DirectoryNode, VirtualTree
     from .cache import LRUCache
 except ImportError:
-    from tree import FSNode, DirectoryNode, FileNode, VirtualTree
+    from tree import DirectoryNode, VirtualTree
     from cache import LRUCache
 
 
 logger = logging.getLogger(__name__)
 
-_executor = ThreadPoolExecutor(max_workers=4)
-_directory_cache = LRUCache(max_size=5000, ttl=600)
+_executor = ThreadPoolExecutor(max_workers=8)
+_directory_cache = LRUCache(max_size=5000, ttl=300)
 
 
 def shutdown_executor() -> None:
-    """Stop background worker threads used for synchronous ORM calls."""
     _executor.shutdown(wait=False, cancel_futures=True)
 
-_DIR_LISTING_TEMPLATE = Template("""<!DOCTYPE html>
-<html>
-<head>
-    <title>Index of {{ path }}</title>
-    <style>
-        body { font-family: monospace; padding: 20px; }
-        h1 { margin-bottom: 20px; }
-        table { border-collapse: collapse; width: 100%; }
-        th { text-align: left; padding: 5px; border-bottom: 1px solid #ccc; }
-        td { padding: 5px; }
-        a { text-decoration: none; color: #0066cc; }
-        a:hover { text-decoration: underline; }
-    </style>
-</head>
-<body>
-    <h1>Index of {{ path }}</h1>
-    <table>
-        <thead>
-            <tr>
-                <th>Name</th>
-                <th>Size</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for entry in entries %}
-            <tr>
-                <td><a href="{{ entry.href }}">{{ entry.name }}</a></td>
-                <td>{{ entry.get('size', '') }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</body>
-</html>
+
+_DIR_TEMPLATE = Template("""<!DOCTYPE html>
+<html><head><title>Index of {{ path }}</title>
+<style>body{font-family:monospace;padding:20px}table{border-collapse:collapse;width:100%}
+th{text-align:left;padding:5px;border-bottom:1px solid #ccc}td{padding:5px}
+a{text-decoration:none;color:#06c}a:hover{text-decoration:underline}</style></head>
+<body><h1>Index of {{ path }}</h1><table>
+<thead><tr><th>Name</th><th>Size</th></tr></thead><tbody>
+{% for e in entries %}<tr><td><a href="{{ e.href }}">{{ e.name }}</a></td><td>{{ e.size }}</td></tr>
+{% endfor %}</tbody></table></body></html>
 """, autoescape=True)
 
 
-class HTTPFilesystem:
-    """HTTP filesystem request handlers with lazy resolution + cache"""
+def _fmt_size(n: int) -> str:
+    if not n:
+        return ""
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024.0:
+            return f"{int(size)}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{size:.1f} PB"
 
+
+def _dir_entry(name: str) -> dict:
+    return {"name": name + "/", "href": quote(name) + "/", "size": ""}
+
+
+def _file_entry(name: str, size: int) -> dict:
+    return {"name": name, "href": quote(name), "size": _fmt_size(size)}
+
+
+def _db_task(fn, *args):
+    """Run a synchronous ORM call in a worker thread with connection hygiene.
+
+    Django connections are thread-local. Under concurrent load a connection can be
+    left in an aborted/unusable state; ``close_old_connections`` discards any such
+    connection so the next query gets a fresh one (otherwise every subsequent
+    request on that thread fails with a 500).
+    """
+    try:
+        from django.db import close_old_connections
+    except ImportError:
+        return fn(*args)
+    close_old_connections()
+    try:
+        return fn(*args)
+    finally:
+        close_old_connections()
+
+
+class HTTPFilesystem:
     def __init__(self, tree: 'VirtualTree'):
         self.tree = tree
 
     async def handle_request(self, path: str, request: Request) -> Response:
-        """Handle incoming HTTP request"""
         if request.method == "GET":
             return await self.handle_get(path, request)
-        elif request.method == "HEAD":
+        if request.method == "HEAD":
             return await self.handle_head(path, request)
-        else:
-            return Response(status_code=405, content="Method not allowed")
+        return Response(status_code=405, content="Method not allowed")
+
+    async def _run(self, fn, *args):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_executor, _db_task, fn, *args)
 
     async def handle_get(self, path: str, request: Request) -> Response:
-        """Handle GET request with lazy resolution"""
-        loop = asyncio.get_running_loop()
-        node = await loop.run_in_executor(_executor, self.tree.resolve_path_with_db, path)
-
+        node = await self._run(self.tree.resolve_path_with_db, path)
         if node is None:
             return Response(status_code=404, content="Not found")
-
         if node.is_directory() and not path.endswith("/"):
-            return RedirectResponse(url=f"{path}/", status_code=301)
-
+            return RedirectResponse(url=quote(path) + "/", status_code=301)
         if node.is_directory():
-            return await self.serve_directory(node, path)
-        else:
-            return await self.serve_file(node)
+            return await self.serve_directory(path)
+        return RedirectResponse(url=node.metadata["stream_url"], status_code=302)
 
     async def handle_head(self, path: str, request: Request) -> Response:
-        """Handle HEAD request with lazy resolution"""
-        loop = asyncio.get_running_loop()
-        node = await loop.run_in_executor(_executor, self.tree.resolve_path_with_db, path)
-
+        node = await self._run(self.tree.resolve_path_with_db, path)
         if node is None:
             return Response(status_code=404, content="Not found")
-
         if node.is_directory() and not path.endswith("/"):
-            return RedirectResponse(url=f"{path}/", status_code=301)
-
+            return RedirectResponse(url=quote(path) + "/", status_code=301)
         if node.is_directory():
-            return Response(status_code=200, headers={"content-type": "text/html; charset=utf-8"})
-        else:
-            return await self.head_file(node)
-
-    async def serve_directory(self, node: DirectoryNode, path: str) -> Response:
-        """Serve directory listing with lazy query + cache"""
-        try:
-            components = [c for c in path.split("/") if c]
-            loop = asyncio.get_running_loop()
-
-            cache_key = f"dir:{path}"
-            cached = _directory_cache.get(cache_key)
-            if cached is not None:
-                html = self._render_directory_html(path, cached)
-                return HTMLResponse(content=html)
-
-            if not components or path == "/":
-                entries = [
-                    {"name": "Movies/", "href": "Movies/", "size": ""},
-                    {"name": "Series/", "href": "Series/", "size": ""}
-                ]
-            elif components[0] == "Movies" and len(components) == 1:
-                # /Movies/ - list categories + All
-                entries = [{"name": "../", "href": "../", "size": ""}]
-                entries.append({"name": "All/", "href": "All/", "size": ""})
-                categories = await loop.run_in_executor(_executor, self.tree.get_enabled_categories, 'movie')
-                for cat in categories:
-                    entries.append({"name": cat + "/", "href": cat + "/", "size": ""})
-            elif components[0] == "Series" and len(components) == 1:
-                # /Series/ - list categories + All
-                entries = [{"name": "../", "href": "../", "size": ""}]
-                entries.append({"name": "All/", "href": "All/", "size": ""})
-                categories = await loop.run_in_executor(_executor, self.tree.get_enabled_categories, 'series')
-                for cat in categories:
-                    entries.append({"name": cat + "/", "href": cat + "/", "size": ""})
-            elif components[0] == "Movies" and len(components) >= 2:
-                if components[1] == "All":
-                    entries = await self._get_movies_listing(None)
-                else:
-                    entries = await self._get_movies_listing(components[1])
-            elif components[0] == "Series" and len(components) == 2:
-                if components[1] == "All":
-                    entries = await self._get_series_listing(None)
-                else:
-                    entries = await self._get_series_listing(components[1])
-            elif components[0] == "Series" and len(components) == 3:
-                # /Series/{Category}/{Show}/ - list seasons
-                series_name = components[2]
-                entries = await self._get_seasons_listing(series_name, components[1])
-            elif components[0] == "Series" and len(components) >= 4:
-                # /Series/{Category}/{Show}/S01/ - list episodes
-                series_name = components[2]
-                season_name = components[3]
-                entries = await self._get_episodes_listing(series_name, season_name, components[1])
-            else:
-                entries = []
-
-            _directory_cache.set(cache_key, entries)
-
-            html = self._render_directory_html(path, entries)
-            return HTMLResponse(content=html)
-
-        except Exception as e:
-            logger.error("Failed to serve directory %s: %s", path, e)
-            logger.debug("Full traceback:", exc_info=True)
-            return Response(status_code=500, content="Error listing directory")
-
-    async def _get_movies_listing(self, category: Optional[str]) -> List[Dict[str, str]]:
-        """Get movies listing with lazy DB query"""
-        loop = asyncio.get_running_loop()
-        movies = await loop.run_in_executor(_executor, self.tree.get_movies_from_db, category)
-
-        entries = [{"name": "../", "href": "../", "size": ""}]
-
-        for movie in movies:
-            href = quote(movie.name)
-            size = self._format_size(movie.get_file_size()) if movie.get_file_size() else ""
-            entries.append({
-                "name": movie.name,
-                "href": href,
-                "size": size
-            })
-
-        return entries
-
-    async def _get_series_listing(self, category: Optional[str]) -> List[Dict[str, str]]:
-        """Get series listing with lazy DB query"""
-        loop = asyncio.get_running_loop()
-        series = await loop.run_in_executor(_executor, self.tree.get_series_from_db, category)
-
-        entries = [{"name": "../", "href": "../", "size": ""}]
-
-        for show in series:
-            href = quote(show.name + "/")
-            entries.append({
-                "name": show.name + "/",
-                "href": href,
-                "size": ""
-            })
-
-        return entries
-
-    async def _get_seasons_listing(self, series_name: str, category: str) -> List[Dict[str, str]]:
-        """Get seasons/episodes listing with lazy DB query"""
-        logger.debug("_get_seasons_listing called for: %s", series_name)
-        loop = asyncio.get_running_loop()
-        series_uuid = await loop.run_in_executor(_executor, self.tree.find_series_uuid_by_name, series_name)
-        logger.debug("_get_seasons_listing found UUID: %s", series_uuid)
-
-        if not series_uuid:
-            logger.warning("Could not find UUID for series: %s", series_name)
-            return []
-
-        seasons = await loop.run_in_executor(_executor, self.tree.get_seasons_from_db, series_uuid)
-
-        series_dir = await loop.run_in_executor(_executor, self.tree.resolve_path_with_db, f"/Series/{category}/{series_name}")
-        if series_dir and isinstance(series_dir, DirectoryNode):
-            for season in seasons:
-                if not series_dir.find_child(season.name):
-                    series_dir.add_child(season)
-
-        entries = [{"name": "../", "href": "../", "size": ""}]
-
-        for season in seasons:
-            href = quote(season.name + "/")
-            entries.append({
-                "name": season.name + "/",
-                "href": href,
-                "size": ""
-            })
-
-        return entries
-
-    async def _get_episodes_listing(self, series_name: str, season_name: str, category: str) -> List[Dict[str, str]]:
-        """Get episodes listing for a specific season with lazy DB query"""
-        logger.debug("_get_episodes_listing called for: %s/%s", series_name, season_name)
-        loop = asyncio.get_running_loop()
-        series_uuid = await loop.run_in_executor(_executor, self.tree.find_series_uuid_by_name, series_name)
-        logger.debug("_get_episodes_listing found UUID: %s", series_uuid)
-
-        if not series_uuid:
-            logger.warning("Could not find UUID for series: %s", series_name)
-            return []
-
-        seasons = await loop.run_in_executor(_executor, self.tree.get_seasons_from_db, series_uuid)
-
-        series_dir = await loop.run_in_executor(_executor, self.tree.resolve_path_with_db, f"/Series/{category}/{series_name}")
-        if series_dir and isinstance(series_dir, DirectoryNode):
-            for season in seasons:
-                existing = series_dir.find_child(season.name)
-                if not existing:
-                    series_dir.add_child(season)
-                elif not existing.children:
-                    for child in season.children:
-                        existing.add_child(child)
-
-        entries = [{"name": "../", "href": "../", "size": ""}]
-
-        for season in seasons:
-            if season.name == season_name:
-                for child in season.children:
-                    if child.is_file():
-                        href = quote(child.name)
-                        size = self._format_size(child.get_file_size()) if child.get_file_size() else ""
-                        entries.append({
-                            "name": child.name,
-                            "href": href,
-                            "size": size
-                        })
-                break
-
-        return entries
-
-    async def serve_file(self, node: FileNode) -> Response:
-        """Serve file - redirect to stream URL"""
-        stream_url = node.metadata.get("stream_url")
-
-        if not stream_url:
-            return Response(status_code=500, content="No stream URL available")
-
-        return RedirectResponse(url=stream_url, status_code=302)
-
-    async def head_file(self, node: FileNode) -> Response:
-        """Handle HEAD request for file"""
-        headers = {
+            return Response(status_code=200,
+                            headers={"content-type": "text/html; charset=utf-8"})
+        return Response(status_code=200, headers={
             "Accept-Ranges": "bytes",
             "Content-Type": node.get_content_type(),
-            "Content-Length": str(node.get_file_size())
-        }
+            "Content-Length": str(node.get_file_size()),
+        })
 
-        if "last_modified" in node.metadata:
-            headers["Last-Modified"] = node.metadata["last_modified"]
+    async def serve_directory(self, path: str) -> Response:
+        try:
+            cached = _directory_cache.get(f"dir:{path}")
+            if cached is None:
+                cached = await self._build_listing(path)
+                _directory_cache.set(f"dir:{path}", cached)
+            html = _DIR_TEMPLATE.render(path=path, entries=cached)
+            return HTMLResponse(content=html)
+        except Exception:
+            logger.exception("Failed to serve directory %s", path)
+            return Response(status_code=500, content="Error listing directory")
 
-        return Response(status_code=200, headers=headers)
+    async def _build_listing(self, path: str) -> List[dict]:
+        comps = [c for c in path.split("/") if c]
+        top = comps[0] if comps else None
+        parent = [{"name": "../", "href": "../", "size": ""}]
 
-    @staticmethod
-    def _format_size(size_bytes: int) -> str:
-        """Convert bytes to human-readable size"""
-        if size_bytes == 0:
-            return ""
-        size = float(size_bytes)
-        for unit in ["B", "KB", "MB", "GB", "TB"]:
-            if size < 1024.0:
-                if unit == "B":
-                    return f"{int(size)}"
-                return f"{size:.1f} {unit}"
-            size /= 1024.0
-        return f"{size:.1f} PB"
+        if not comps:                                            # /
+            return [_dir_entry("Movies"), _dir_entry("Series")]
 
-    def _render_directory_html(self, path: str, entries: list) -> str:
-        """Render directory listing HTML"""
-        return _DIR_LISTING_TEMPLATE.render(path=path, entries=entries)
+        if top not in ("Movies", "Series"):
+            return parent
+
+        if len(comps) == 1:                                      # /Movies or /Series
+            ct = 'movie' if top == "Movies" else 'series'
+            cats = await self._run(self.tree.categories, ct)
+            return parent + [_dir_entry("All")] + [_dir_entry(c) for c in cats]
+
+        category = None if comps[1] == "All" else comps[1]
+
+        if top == "Movies":
+            if len(comps) == 2:                                  # /Movies/{All|cat}
+                movies = await self._run(self.tree.movies, category)
+                return parent + [_dir_entry(m['folder']) for m in movies]
+            if len(comps) == 3:                                  # /Movies/{cat}/{folder}
+                files = await self._run(self.tree.movie_files, comps[2], category)
+                return parent + [_file_entry(f['filename'], f['size']) for f in files]
+            return parent
+
+        # Series
+        if len(comps) == 2:                                      # /Series/{All|cat}
+            shows = await self._run(self.tree.series, category)
+            return parent + [_dir_entry(s['folder']) for s in shows]
+        if len(comps) == 3:                                      # /Series/{cat}/{show}
+            seasons = await self._run(self.tree.seasons, comps[2], category)
+            return parent + [_dir_entry(s) for s in seasons]
+        if len(comps) == 4:                                      # /Series/{cat}/{show}/Season NN
+            eps = await self._run(self.tree.episodes, comps[2], comps[3], category)
+            return parent + [_file_entry(e['filename'], e['size']) for e in eps]
+        return parent

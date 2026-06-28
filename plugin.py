@@ -29,7 +29,6 @@ class Plugin:
     """VOD HTTP Filesystem Plugin - Main entry point"""
 
     def __init__(self):
-        self._child_process = None
         self._pid_file = "/data/plugins/vodfs/server.pid"
         self._data_dir = "/data/plugins/vodfs"
         os.makedirs(self._data_dir, exist_ok=True)
@@ -90,6 +89,25 @@ class Plugin:
         else:
             return {"status": "error", "message": f"Unknown action: {action}"}
 
+    _DEPENDENCIES = ("uvicorn", "fastapi", "jinja2")
+
+    def _ensure_dependencies(self, python_exe: str, logger: logging.Logger) -> None:
+        """Best-effort install of the web-server dependencies into Dispatcharr's venv."""
+        check = "import importlib.util,sys; sys.exit(0 if all(importlib.util.find_spec(m) for m in %r) else 1)" % (self._DEPENDENCIES,)
+        try:
+            if subprocess.call([python_exe, "-c", check]) == 0:
+                return
+            logger.info("Installing VODFS web dependencies: %s", ", ".join(self._DEPENDENCIES))
+            subprocess.call([python_exe, "-m", "ensurepip", "--upgrade"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            rc = subprocess.call([python_exe, "-m", "pip", "install", "-q", *self._DEPENDENCIES])
+            if rc != 0:
+                logger.warning("Dependency install returned %d; server may fail to start. "
+                               "Install manually: %s -m pip install %s",
+                               rc, python_exe, " ".join(self._DEPENDENCIES))
+        except Exception as e:
+            logger.warning("Could not verify/install dependencies (%s); continuing", e)
+
     def _enable(self, logger: logging.Logger, settings: Dict[str, Any]) -> Dict[str, Any]:
         """Enable the plugin and start child process"""
         # Check if already running
@@ -115,8 +133,12 @@ class Plugin:
         plugin_subdir = os.path.join(plugin_dir, "plugin")
         runner_path = os.path.join(plugin_subdir, "standalone_runner.py")
 
-        # Use the Dispatcharr Python environment which has all dependencies
-        python_exe = "/dispatcharrpy/bin/python"  # Use explicit Python path (sys.executable is uwsgi in container)
+        # Use the Dispatcharr Python environment (sys.executable is uwsgi in the container).
+        python_exe = "/dispatcharrpy/bin/python"
+
+        # The web server needs uvicorn/fastapi/jinja2, which are not part of
+        # Dispatcharr's base environment. Install them on first enable.
+        self._ensure_dependencies(python_exe, logger)
 
         cmd = [
             python_exe, runner_path,
@@ -155,9 +177,9 @@ class Plugin:
 
             # Save PID for graceful shutdown
             self._save_pid(process.pid)
-            self._child_process = process
 
-            logger.info("Server started on PID %d, binding to 127.0.0.1:%d", process.pid, port)
+            logger.info("Server started on PID %d, listening on 0.0.0.0:%d "
+                        "(reachable via the container's published port)", process.pid, port)
 
             return {
                 "status": "ok",

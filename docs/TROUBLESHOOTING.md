@@ -38,15 +38,19 @@ VODFS only lists relations whose category is enabled **and** whose `m3u_account`
 
 ## Playback Fails in Plex
 
-Plex sees the file and starts a play, then errors or buffers forever. The `302` redirect is the thing to interrogate:
+Plex sees the file and starts a play, then errors or buffers forever. The `302` redirect is the thing to interrogate — note this is a `GET`, not a `HEAD` (`HEAD` on a file returns `200` with the size, not the redirect):
 
 ```bash
-curl -I http://127.0.0.1:8888/Movies/All/"<filename>"
+curl -s -o /dev/null -D - http://127.0.0.1:8888/Movies/All/"<folder>"/"<filename>"
 ```
 
 Look at the `Location:` header. The host portion of that URL is the **Dispatcharr Base URL** plugin setting. Plex needs to be able to reach that host. If Dispatcharr is in Docker, set the base URL to the address Plex can resolve (LAN IP, hostname, or a Docker alias on a shared network), not `127.0.0.1`.
 
 If the redirect URL looks right but Plex still errors, hit it directly with `curl -I` to confirm Dispatcharr's proxy is serving the stream.
+
+## Missing Audio or Subtitle Tracks
+
+VODFS writes no sidecar subtitle files — the Xtream API has no subtitle data. Every audio language and subtitle is embedded in the container and only appears after Plex analyses the stream, which depends on an accurate file size. If tracks are missing, the size probe is the suspect: confirm `HEAD` returns a real `Content-Length` (`curl -I` on the file), check that probing isn't disabled (`VODFS_PROBE_SIZE`), and re-run Plex's analyse pass on the item. A `Content-Length` of exactly 2 GiB means the probe failed and the duration-based estimate was used — the proxy or base URL is unreachable from the VODFS process.
 
 ## Slow Listings on Large Libraries
 

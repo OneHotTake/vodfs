@@ -23,6 +23,8 @@ def setup_django():
         django.setup()
         logger.info("Django initialized successfully in child process")
 
+        _use_blocking_db_backend()
+
         # Verify model access
         from apps.vod.models import Movie, Series
         logger.info("VOD models accessible: Movie, Series")
@@ -30,6 +32,33 @@ def setup_django():
     except Exception as e:
         logger.error("Failed to initialize Django: %s", e)
         return False
+
+
+def _use_blocking_db_backend():
+    """Swap Dispatcharr's gevent connection-pool DB backend for the standard
+    blocking psycopg3 backend in THIS process.
+
+    Dispatcharr serves its own workers under gevent (django-db-geventpool), whose
+    cooperative connections require a running gevent hub. Our standalone server is
+    asyncio (uvicorn) + a thread pool with no gevent hub, so the pooled connections
+    raise `gevent LoopExit: This operation would block forever` under concurrency.
+    The standard backend uses ordinary blocking connections — one per worker thread.
+    """
+    from django.conf import settings
+    from django.db import connections
+
+    db = settings.DATABASES.get("default", {})
+    engine = db.get("ENGINE", "")
+    if "geventpool" in engine or "psycopg3" in engine or engine.startswith("dispatcharr"):
+        db["ENGINE"] = "django.db.backends.postgresql"
+        db["OPTIONS"] = {}
+        db["CONN_MAX_AGE"] = 60
+        try:
+            del connections["default"]
+        except Exception:
+            pass
+        logger.info("Standalone DB backend set to standard blocking psycopg3 "
+                    "(was %s)", engine)
 
 
 def run_server(port: int = 8888):
@@ -43,9 +72,8 @@ def run_server(port: int = 8888):
     if plugin_dir not in sys.path:
         sys.path.insert(0, plugin_dir)
 
-    # Now we can import our modules
-    from tree import VirtualTree
-    from server import create_app, run_server as _run_server
+    # server.run_server builds the VirtualTree and the FastAPI app itself.
+    from server import run_server as _run_server
 
     logger.info("Starting HTTP filesystem server on port %d", port)
     _run_server(port)

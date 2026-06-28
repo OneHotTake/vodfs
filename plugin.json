@@ -1,10 +1,10 @@
 {
   "name": "VOD HTTP Filesystem",
-  "version": "0.1.0",
-  "description": "Expose VOD library to Plex as mountable HTTP filesystem with category support and multi-provider streaming",
+  "version": "1.0.0",
+  "description": "Expose your Dispatcharr VOD library to Plex/Jellyfin as a mountable HTTP filesystem with Plex-correct naming, category support, multi-provider streaming, and accurate seekable playback via Dispatcharr's native VOD proxy",
   "author": "onehottake",
   "license": "MIT",
-  "repo_url": "https://github.com/OneHotTake/dispatcharr-vodfs",
+  "repo_url": "https://github.com/OneHotTake/vodfs",
   "discord_thread": "",
   "min_dispatcharr_version": "v0.20.0",
   "fields": [

@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import os
-import random
 import uvicorn
 from contextlib import asynccontextmanager
 from typing import List
@@ -22,37 +21,14 @@ except (ImportError, AttributeError):
 logger = logging.getLogger(__name__)
 
 _ENABLE_AUTH = os.environ.get("VODFS_ENABLE_AUTH", "false").lower() == "true"
+# Bind host. Defaults to 0.0.0.0: the server runs inside the Dispatcharr
+# container and must be reachable through Docker's published port by rclone/Plex,
+# which a 127.0.0.1-only listener prevents. Lock down with VODFS_BIND_HOST and/or
+# enable_auth + Dispatcharr's STREAMS network policy when exposing it.
+_BIND_HOST = os.environ.get("VODFS_BIND_HOST", "0.0.0.0")
 
 _server_ready = False
 _startup_errors: List[str] = []
-
-_FORTUNES = [
-    "302 Found: Your movie has been redirected to happiness.",
-    "VODFS: because your IPTV provider gave you chaos, and Plex demanded folders.",
-    "The best filesystem is the one that never stores your files.",
-    "A watched directory never buffers. Probably.",
-    "Your stream is in another proxy.",
-    "The answer is 42, but the path is /Movies/All.",
-    "In the beginning, the library was created. This made Plex rather cross.",
-    "Never forget your towel, your API key, or your mount command.",
-    "This endpoint is mostly harmless, except to bad vibes and malformed paths.",
-    "If the universe is expanding, your rclone mount should probably be daemonized.",
-    "A sufficiently advanced playlist is indistinguishable from a filesystem.",
-    "The improbability drive selected provider STRONG. Please remain seated.",
-    "So long, and thanks for all the streams.",
-    "Beware of the Plex scanner. It is large, hungry, and fond of HEAD requests.",
-    "The guide says: if confused, open /rclone_conf and copy the nice block.",
-    "Today's special: one category, two providers, zero manifests.",
-    "Do not taunt the proxy. It knows where the bytes live.",
-    "You are in a maze of twisty VOD categories, all alike, except enabled=True.",
-    "The filesystem apologizes for the inconvenience.",
-    "Panic is deprecated. Please use structured logging instead.",
-    "The stream you requested has been moved to a small blue planet near /proxy/vod.",
-    "If at first you don't succeed, check whether FUSE is installed.",
-    "A movie is just a redirect wearing a filename.",
-    "The category is not the territory, but Plex will scan it anyway.",
-    "Congratulations. You found the hidden endpoint and voided absolutely no warranties.",
-]
 
 
 def check_network_access(request: Request):
@@ -105,7 +81,9 @@ def _check_django_available():
     if integrator.is_available():
         logger.info("Django available - all queries will be live against DB")
     else:
-        logger.warning("Django not available - queries will return empty results")
+        msg = "Django/VOD models not available - listings will be empty"
+        logger.warning(msg)
+        _startup_errors.append(msg)
 
     _server_ready = True
 
@@ -142,14 +120,15 @@ def _query_stats_sync() -> dict:
     """Synchronous ORM portion of /stats. Returns counts only."""
     try:
         from apps.vod.models import M3UMovieRelation, M3USeriesRelation
-        from django.db.models import F, Count
+        from django.db.models import Count
     except ImportError:
         return {"available": False}
 
-    enabled = dict(
-        category__m3u_relations__enabled=True,
-        category__m3u_relations__m3u_account=F("m3u_account"),
-    )
+    try:
+        from .tree import _enabled
+    except ImportError:
+        from tree import _enabled
+    enabled = _enabled()
 
     def per_category(model):
         rows = (
@@ -253,17 +232,6 @@ def create_app(tree: VirtualTree) -> FastAPI:
             media_type="text/plain; charset=utf-8",
         )
 
-    @app.get("/fortune")
-    async def fortune(
-        _network=Depends(check_network_access),
-        _auth=Depends(check_api_key_auth),
-    ):
-        """Return a tiny VODFS fortune."""
-        return Response(
-            content=random.choice(_FORTUNES) + "\n",
-            media_type="text/plain; charset=utf-8",
-        )
-
     @app.get("/stats")
     async def stats(
         _network=Depends(check_network_access),
@@ -305,15 +273,13 @@ def create_app(tree: VirtualTree) -> FastAPI:
 
 def run_server(port: int, log_level: str = "info"):
     """Run the FastAPI server using uvicorn"""
-    tree = VirtualTree()
-    tree.build()
+    app = create_app(VirtualTree())
 
-    app = create_app(tree)
-
-    logger.info("Uvicorn starting on 0.0.0.0:%d (auth: %s)", port, "enabled" if _ENABLE_AUTH else "disabled")
+    logger.info("Uvicorn starting on %s:%d (auth: %s)", _BIND_HOST, port,
+                "enabled" if _ENABLE_AUTH else "disabled")
     uvicorn.run(
         app,
-        host="0.0.0.0",
+        host=_BIND_HOST,
         port=port,
         log_level=log_level,
         access_log=True
