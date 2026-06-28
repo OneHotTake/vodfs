@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0] — 2026-06-28
+## [0.42.0] — 2026-06-28
 
 First production release. Verified end-to-end against Dispatcharr 0.27.1 with a live library (3,000+ movies, ~180 series, ~3,000 episodes): rclone mount → Plex match (TMDB/IMDB) → seekable playback through the native VOD proxy, validated with Plex, Chromium, and ffmpeg.
 

@@ -1,6 +1,6 @@
 {
   "name": "VOD HTTP Filesystem",
-  "version": "1.0.0",
+  "version": "0.42.0",
   "description": "Expose your Dispatcharr VOD library to Plex/Jellyfin as a mountable HTTP filesystem with Plex-correct naming, category support, multi-provider streaming, and accurate seekable playback via Dispatcharr's native VOD proxy",
   "author": "onehottake",
   "license": "MIT",
