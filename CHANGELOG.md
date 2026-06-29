@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.1] — 2026-06-29
+
 Robustness pass informed by a comparison against the VOD2MLIB plugin — adopting the fixes that apply to our live-query/302 model, while deliberately skipping its push-to-disk machinery (`.strm`/`.nfo` files, cron rescans, on-disk URL persistence) that our architecture doesn't need.
 
 ### Added
@@ -18,6 +20,7 @@ Robustness pass informed by a comparison against the VOD2MLIB plugin — adoptin
 - **Scheduled size hydration** (`plugin/hydrator.py`) — a daemon-thread scheduler (PiratesIRC convention, no Celery beat): a full pass on enable (`hydrate_on_load`) plus configurable off-peak `scheduled_times` + `timezone`, with each pass time-capped (`VODFS_HYDRATE_MAX_MINUTES`, default 240) so it can't bleed into peak viewing. Fetches run with **bounded parallelism** (`VODFS_HYDRATE_CONCURRENCY`, default 8) — ~9–10/sec measured on a real provider vs ~1.1/sec for the old serial drip. `get_vod_info` has no batch endpoint, so concurrency is the speed knob *and* the provider-load cap. See `docs/HYDRATION.md`.
 - **Plugin actions** — 💧 Hydrate Now (immediate pass) and 🩺 Status (visible-vs-pending counts, next scheduled run, live concurrency).
 - **Self-deriving rclone config URL** — `/vodfs/rclone_conf` builds the reachable URL from the request's forwarded headers (`X-Forwarded-Proto/Host/Prefix`), so the page shows the address the browser actually used instead of a hard-coded `127.0.0.1`.
+- **Project logo** (`logo.png`) — a Plex-amber play triangle fed by HTTP-filesystem stream bars; Dispatcharr shows it as the plugin icon.
 
 ### Fixed
 - **OOM on large libraries.** `/Movies/All` (and category/series lists) built the entire listing in RAM — at ~100k titles it ballooned to ~2 GB and got OOM-killed. Listings now **stream** (`.values()` + `.order_by(id).iterator()` + `StreamingResponse`, emitting rows incrementally); peak RSS is flat (126 MB measured streaming 99,611 rows on prod) regardless of library size. The warmed folder→id maps were dropped (descent falls back to the tmdb/imdb/title lookup, now keyed on the title's most *distinctive* word, not "The").
