@@ -1,0 +1,50 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2a1758"/>
+      <stop offset="0.55" stop-color="#140b2e"/>
+      <stop offset="1" stop-color="#08060f"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.62" cy="0.5" r="0.55">
+      <stop offset="0" stop-color="#36e0ff" stop-opacity="0.55"/>
+      <stop offset="0.5" stop-color="#7c3aed" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#7c3aed" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="play" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3ee8ff"/>
+      <stop offset="0.5" stop-color="#9d5cff"/>
+      <stop offset="1" stop-color="#ff3df0"/>
+    </linearGradient>
+    <linearGradient id="flow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#36e0ff" stop-opacity="0.15"/>
+      <stop offset="1" stop-color="#36e0ff"/>
+    </linearGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="10"/>
+    </filter>
+  </defs>
+
+  <!-- app tile -->
+  <rect x="16" y="16" width="480" height="480" rx="116" fill="url(#bg)"/>
+  <!-- top sheen + edge -->
+  <rect x="16" y="16" width="480" height="480" rx="116" fill="none" stroke="#ffffff" stroke-opacity="0.10" stroke-width="2"/>
+  <rect x="16" y="17" width="480" height="200" rx="116" fill="#ffffff" fill-opacity="0.05"/>
+
+  <!-- glow behind the play head -->
+  <circle cx="300" cy="256" r="150" fill="url(#glow)"/>
+
+  <!-- stream / HTTP-filesystem flow bars feeding the play -->
+  <g>
+    <rect x="96"  y="196" width="118" height="22" rx="11" fill="url(#flow)" opacity="0.85"/>
+    <rect x="78"  y="245" width="150" height="22" rx="11" fill="url(#flow)"/>
+    <rect x="96"  y="294" width="118" height="22" rx="11" fill="url(#flow)" opacity="0.85"/>
+  </g>
+
+  <!-- play triangle (VOD) with rounded corners -->
+  <path d="M214 150 L392 256 L214 362 Z"
+        fill="url(#play)"
+        stroke="url(#play)" stroke-width="34" stroke-linejoin="round"/>
+  <!-- inner highlight -->
+  <path d="M214 150 L392 256 L214 362 Z" fill="none"
+        stroke="#ffffff" stroke-opacity="0.30" stroke-width="3" stroke-linejoin="round"/>
+</svg>
